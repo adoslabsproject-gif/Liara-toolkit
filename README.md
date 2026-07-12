@@ -101,8 +101,35 @@ I modelli si scaricano al primo avvio da HuggingFace — **[`adoslabs/liara-pers
 </tbody>
 </table>
 
-> 🔜 **In arrivo — Liara 1.58-bit (BitNet ternario).** Un modello **ultra-compatto** in fase di addestramento
-> su un **dataset italiano di tool-calling curato a mano**, pensato per girare anche sui dispositivi più leggeri.
+<br>
+
+## 🔬 Cosa stiamo costruendo
+
+Il prossimo passo è **Liara 1.58-bit** — un modello **ternario (BitNet b1.58)** in cui ogni peso è **{-1, 0, +1}**.
+Rispetto a un FP16 è **~8× più leggero**: pensato per girare fluido anche sui telefoni più modesti, **senza
+rinunciare al tool-calling**.
+
+<div align="center">
+<img src="media/quantization.svg" alt="Quantizzazione: da FP16 a 1.58-bit ternario" width="92%" />
+</div>
+
+Il suo "cervello" nasce da un **dataset italiano di tool-calling curato a mano**: il **Liara 32B** fa da
+*teacher* e genera gli esempi (chiamate a strumenti, conversazioni, casi limite), che vengono filtrati e usati
+per il **fine-tuning** del modello piccolo.
+
+<div align="center">
+<img src="media/dataset.svg" alt="Generazione del dataset per il fine-tuning" width="92%" />
+</div>
+
+**Roadmap**
+
+| | |
+|---|---|
+| ✅ | Modalità **cloud** (Liara 32B) — attivazione istantanea + **visione cloud** (immagini al 32B) |
+| ✅ | **Fotocamera** + allegati mostrati nel **bubble** di chat (thumbnail apribile) |
+| 🔄 | **Liara 1.58-bit** (BitNet ternario) — *in addestramento* |
+| ⏳ | **Sensori** del dispositivo: timer/sveglia · GPS · fotocamera come strumento |
+| ⏳ | **Documenti in cloud** (RAG on-device → 32B) |
 
 <br>
 
