@@ -1,0 +1,70 @@
+[package]
+name = "app"
+# NB: la versione RILASCIATA vive in tauri.conf.json (bundle APK/DMG); qui va
+# tenuta allineata a ogni bump (review #7: era rimasta 0.1.0 con release 0.1.6).
+version = "0.2.8"
+description = "Liara — assistente personale AI local-first (Tauri: core Rust + llama.cpp in-process)"
+authors = ["Nicola Cucurachi"]
+edition = "2021"
+default-run = "app"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+pdf-extract = "0.7"
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+imap = { version = "2.4", default-features = false }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "0.26"
+ring = "0.17"
+chrono = "0.4"
+meval = "0.2"
+ureq = "2"
+# estrazione dei modelli audio (liara-audio.zip scaricato on-demand da GitHub). Solo deflate:
+# niente bzip2/zstd/lzma (dipendenze native che complicherebbero il build Android).
+zip = { version = "2", default-features = false, features = ["deflate"] }
+html2text = "0.6"
+mailparse = "0.15"
+aes-gcm = "0.10"
+rand = "0.8"
+base64 = "0.22"
+# audio subsystem: Piper TTS + whisper STT (sherpa-onnx, local, cross-platform), mic + playback
+sherpa-rs = { version = "0.6", features = ["download-binaries"] }
+cpal = "0.15"
+rodio = { version = "0.19", default-features = false }
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "rustls-tls", "builder"] }
+
+# GPU acceleration: Metal on Apple (Mac/iOS), CPU elsewhere (Android stays CPU/Vulkan later)
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+llama-cpp-2 = { version = "0.1", features = ["metal", "mtmd"] }
+llama-cpp-sys-2 = "0.1"
+
+[target.'cfg(not(any(target_os = "macos", target_os = "ios")))'.dependencies]
+llama-cpp-2 = { version = "0.1", features = ["mtmd"] }
+llama-cpp-sys-2 = "0.1"
+
+# Android: inizializziamo ndk_context (JavaVM + Application context) così cpal/oboe (audio) funzionano.
+[target.'cfg(target_os = "android")'.dependencies]
+ndk-context = "0.1"
+jni = "0.21"
+
+
+# Usa la copia vendorata di llama-cpp-sys-2 (build.rs patchato per accendere GGML_VULKAN su Android).
+[patch.crates-io]
+llama-cpp-sys-2 = { path = "vendor/llama-cpp-sys-2" }

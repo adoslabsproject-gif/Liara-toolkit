@@ -1,0 +1,14 @@
+# Android 16 KB page size: allinea i segmenti LOAD delle librerie che COMPILIAMO (libapp_lib.so) a 16 KB,
+# così Samsung/Android 15+ non mostra l'avviso "non compatibile con dimensioni pagina di 16 kB".
+# (Le prebuilt di terzi — onnxruntime — vanno allineate a parte: vedi build.)
+[target.aarch64-linux-android]
+rustflags = [
+    "-C", "link-arg=-Wl,-z,max-page-size=16384",
+    "-C", "link-arg=-Wl,-z,common-page-size=16384",
+]
+
+[target.armv7-linux-androideabi]
+rustflags = [
+    "-C", "link-arg=-Wl,-z,max-page-size=16384",
+    "-C", "link-arg=-Wl,-z,common-page-size=16384",
+]

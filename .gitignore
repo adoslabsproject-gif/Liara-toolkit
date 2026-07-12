@@ -1,0 +1,40 @@
+# ── Build artifacts ──────────────────────────────────────────
+app/node_modules/
+app/dist/
+app/src-tauri/target/
+app/src-tauri/gen/
+target/
+*.log
+
+# ── Model weights & LoRA (NON vanno su git — distribuiti a parte) ──
+models/
+lora/
+*.gguf
+*.safetensors
+*.bin
+*.pt
+*.onnx
+
+# ── Dataset / training / generatori (restano PRIVATI, mai su git) ──
+*.jsonl
+*.parquet
+dataset/
+datasets/
+gold/
+ml/
+training/
+finetune/
+
+# ── Secrets (mai committare) ─────────────────────────────────
+.dev-master-key
+*.key
+.env
+.env.*
+secrets.*
+*.pem
+
+# ── OS / editor ──────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

@@ -1,0 +1,26 @@
+//! Tauri command handlers, grouped by domain. Each is re-exported so `lib.rs`
+//! can list them in `tauri::generate_handler![...]`.
+pub mod audio;
+pub mod calendar;
+pub mod consent;
+pub mod download;
+pub mod email;
+pub mod generate;
+pub mod memory;
+pub mod model_files;
+pub mod rag;
+pub mod remote;
+pub mod sink;
+pub mod vision;
+
+pub use audio::*;
+pub use calendar::*;
+pub use consent::*;
+pub use download::*;
+pub use email::*;
+pub use generate::*;
+pub use memory::*;
+pub use model_files::*;
+pub use rag::*;
+pub use remote::*;
+pub use vision::*;

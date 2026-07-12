@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no" />
+    <title>Liara</title>
+    <style>
+      /* sfondo scuro SUBITO: niente flash bianco prima dello splash */
+      html, body { margin: 0; background: #0b0d12; }
+      /* splash HTML istantaneo: appena la WebView carica l'HTML, PRIMA del bundle JS.
+         React, quando monta in #root, ne rimpiazza il contenuto → lo splash sparisce da solo.
+         Identico a .load-overlay React → transizione invisibile. */
+      #boot-splash { position: fixed; inset: 0; z-index: 9999; display: flex; flex-direction: column;
+        align-items: center; justify-content: center; gap: 14px; padding: 24px; text-align: center;
+        background: #0b0d12; font-family: system-ui, -apple-system, sans-serif; }
+      #boot-splash .sp { width: 56px; height: 56px; border-radius: 50%; border: 4px solid #1e2330;
+        border-top-color: #7c5cff; animation: bootspin .9s linear infinite; }
+      @keyframes bootspin { to { transform: rotate(360deg); } }
+      #boot-splash .ti { font-size: 22px; font-weight: 600; color: #e6e8ee; }
+      #boot-splash .su { font-size: 15px; color: #7c5cff; }
+      #boot-splash .hi { font-size: 13px; color: #8b91a1; max-width: 300px; line-height: 1.5; }
+    </style>
+  </head>
+
+  <body>
+    <div id="root">
+      <div id="boot-splash">
+        <div class="sp"></div>
+        <div class="ti">Avvio Liara…</div>
+        <div class="su">Preparo il modello locale…</div>
+        <div class="hi">Un momento — la prima apertura richiede qualche secondo.</div>
+      </div>
+    </div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
