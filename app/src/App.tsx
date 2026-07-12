@@ -81,6 +81,25 @@ export default function App() {
   };
   const [attachments, setAttachments] = useState<{ name: string; icon: string }[]>([]);
   const [image, setImage] = useState<string | null>(null); // data URL of an attached image → vision
+  const [camOpen, setCamOpen] = useState(false); // fotocamera aperta (cattura → stessa pipeline visione)
+  const camVideoRef = useRef<HTMLVideoElement>(null);
+  const camStreamRef = useRef<MediaStream | null>(null);
+  useEffect(() => () => { camStreamRef.current?.getTracks().forEach((tr) => tr.stop()); }, []); // stop camera su unmount
+  // Aggancia lo stream al <video> QUANDO è montato (camOpen true). Il preview nero su WKWebView/macOS
+  // nasce dall'assegnare srcObject troppo presto o dal non chiamare play(): qui aspettiamo il mount reale
+  // e forziamo play() sia subito sia su 'loadedmetadata' (alcune WebView renderizzano solo dopo i metadati).
+  useEffect(() => {
+    if (!camOpen) return;
+    const v = camVideoRef.current;
+    const s = camStreamRef.current;
+    if (!v || !s) return;
+    v.srcObject = s;
+    v.muted = true; // proprietà (non solo attributo) → autoplay inline consentito senza gesto utente
+    const play = () => { v.play().catch(() => {}); };
+    v.addEventListener("loadedmetadata", play);
+    play();
+    return () => v.removeEventListener("loadedmetadata", play);
+  }, [camOpen]);
   const [speaking, setSpeaking] = useState(false);
   const [listening, setListening] = useState(false);
   const [consentReq, setConsentReq] = useState<{ tool: string; action: string } | null>(null);
@@ -453,6 +472,47 @@ export default function App() {
     refreshConvs();
   }
 
+  // --- Fotocamera: cattura un frame e lo manda alla STESSA pipeline visione dell'allegato 🖼️ ---
+  // Via webview MediaDevices → funziona su Android/Mac/Windows senza codice nativo. La foto diventa
+  // `image` (data URL) esattamente come un allegato: il modello VL la analizza al prossimo messaggio.
+  async function openCamera() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: "environment" } }, audio: false, // camera posteriore quando c'è
+      });
+      camStreamRef.current = stream;
+      setCamOpen(true); // il <video> viene montato dal render; lo stream lo aggancia l'useEffect qui sotto
+      haptic(20);
+    } catch {
+      setStatus(t("Fotocamera non disponibile o permesso negato", "Camera unavailable or permission denied"));
+      setTimeout(() => setStatus(""), 3000);
+    }
+  }
+  function closeCamera() {
+    camStreamRef.current?.getTracks().forEach((tr) => tr.stop()); // rilascia la fotocamera (LED off)
+    camStreamRef.current = null;
+    setCamOpen(false);
+  }
+  function capturePhoto() {
+    const video = camVideoRef.current;
+    if (!video) return;
+    const MAX = 512; // stessa soglia dell'allegato: immagine piccola = niente OOM su telefono
+    let w = video.videoWidth, h = video.videoHeight;
+    if (!w || !h) return;
+    if (w > MAX || h > MAX) { const s = MAX / Math.max(w, h); w = Math.round(w * s); h = Math.round(h * s); }
+    const canvas = document.createElement("canvas");
+    canvas.width = w; canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) { setStatus(t("Immagine non leggibile", "Image can't be read")); return; }
+    ctx.drawImage(video, 0, 0, w, h);
+    setImage(canvas.toDataURL("image/jpeg", 0.85)); // stesso formato dell'allegato
+    setAttachments([{ name: "foto.jpg", icon: "📷" }]);
+    closeCamera();
+    haptic([20, 40, 20]);
+    setStatus(t("📷 Foto pronta — scrivi una domanda (o invia) e la analizzo", "📷 Photo ready — type a question (or send) and I'll analyse it"));
+    setTimeout(() => setStatus(""), 3500);
+  }
+
   async function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     e.target.value = "";
@@ -669,6 +729,9 @@ export default function App() {
         {!busy && md.hasVision && (
           <button className="send attach" title={t("Allega documento (lo indicizzo per risponderti)", "Attach a document (I'll index it to answer you)")} onClick={() => fileRef.current?.click()}>📎</button>
         )}
+        {!busy && md.hasVision && (
+          <button className="send attach" title={t("Scatta una foto e la analizzo", "Take a photo and I'll analyse it")} onClick={openCamera}>📷</button>
+        )}
         {!busy && (() => {
           const micStart = async () => {
             if (!(await ensureAudio())) return; // scarica+estrae la voce al PRIMO uso (poi è locale)
@@ -739,6 +802,18 @@ export default function App() {
             <div className="consent-btns">
               <button className="ghost" onClick={() => { setCloudAsk(false); haptic(12); }}>{t("Annulla", "Cancel")}</button>
               <button className="send-sm" onClick={() => { setCloudMode(true); setCloudAsk(false); md.setSwitchTo(t("Liara Cloud 32B ☁️", "Liara Cloud 32B ☁️")); haptic(20); }}>{t("☁️ Attiva cloud", "☁️ Enable cloud")}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {camOpen && (
+        <div className="modal-overlay" onClick={closeCamera}>
+          <div className="cammodal" onClick={(e) => e.stopPropagation()}>
+            <video ref={camVideoRef} className="camview" playsInline muted autoPlay />
+            <div className="consent-btns">
+              <button className="ghost" onClick={closeCamera}>{t("Annulla", "Cancel")}</button>
+              <button className="send-sm" onClick={capturePhoto}>📷 {t("Scatta", "Capture")}</button>
             </div>
           </div>
         </div>

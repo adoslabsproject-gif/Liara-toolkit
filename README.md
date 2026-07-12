@@ -4,15 +4,16 @@
 
 # Liara
 
-### Un "second brain" AI, **100% locale**, sul tuo telefono
+### Assistente AI personale, **on-device e privacy-first**, sul tuo telefono
 
-Assistente AI personale che gira **interamente sul dispositivo** — Android e desktop.<br>
-Nessun cloud, nessun account, funziona anche **senza rete**. I tuoi dati **non escono dal telefono**.
+Gira **sul dispositivo** (Android e desktop): LLM locale, agente con strumenti, memoria cifrata.<br>
+Funziona **offline**. È disponibile una **modalità cloud opzionale** (Liara 32B), attivabile solo con il tuo consenso.
 
 <br>
 
-<img src="https://img.shields.io/badge/privacy-100%25%20on--device-2ea44f" alt="on-device" />
+<img src="https://img.shields.io/badge/on--device-privacy--first-2ea44f" alt="on-device" />
 <img src="https://img.shields.io/badge/rete-funziona%20offline-2ea44f" alt="offline" />
+<img src="https://img.shields.io/badge/visione-nativa%20(Gemma%204)-8a2be2" alt="vision" />
 <img src="https://img.shields.io/badge/core-Rust-orange" alt="Rust" />
 <img src="https://img.shields.io/badge/UI-React%20%2B%20Tauri-61dafb" alt="React + Tauri" />
 <img src="https://img.shields.io/badge/piattaforme-Android%20%7C%20Desktop-blue" alt="platforms" />
@@ -22,9 +23,10 @@ Nessun cloud, nessun account, funziona anche **senza rete**. I tuoi dati **non e
 
 ---
 
-> 🔒 **Nessuna telemetria. Nessun server. Nessun crypto / token / wallet.**
+> 🔒 **On-device di default. Nessuna telemetria. Nessun crypto / token / wallet.**
 > "Crittografato" qui significa che i tuoi dati sono **cifrati sul dispositivo** (AES-256), non criptovalute.
-> Il codice è **pubblico e verificabile** proprio per questo: *non fidarti, leggi il codice.*
+> L'unica volta in cui qualcosa lascia il telefono è se **tu** attivi la **modalità cloud** (Liara 32B),
+> e solo previo consenso esplicito. Il codice è **pubblico e verificabile**: *non fidarti, leggi il codice.*
 
 <br>
 
@@ -35,7 +37,10 @@ Nessun cloud, nessun account, funziona anche **senza rete**. I tuoi dati **non e
 <td width="50%" valign="top">
 
 🧠 **LLM on-device**<br>
-<sub>Qwen3 **1.5B** e **4B** (GGUF quantizzati), chat in streaming, completamente **offline**.</sub>
+<sub>Modelli **Liara** (1.7B / 4B) e **Gemma 4** (E4B / 12B), GGUF quantizzati. Chat in streaming, **offline**.</sub>
+
+📷 **Visione nativa**<br>
+<sub>Con i modelli **Gemma 4** alleghi una **foto o un documento** 📎 e Liara la analizza — anche su Android.</sub>
 
 🛠️ **Agente con strumenti**<br>
 <sub>Loop ReAct + chiamate a **grammatica vincolata (GBNF)** → JSON sempre valido, mai malformato.</sub>
@@ -43,17 +48,14 @@ Nessun cloud, nessun account, funziona anche **senza rete**. I tuoi dati **non e
 🗂️ **Memoria vettoriale cifrata**<br>
 <sub>Ricorda le conversazioni; profilo e fatti iniettati a ogni turno.</sub>
 
-📝 **Appunti intelligenti**<br>
-<sub>Salvi note di qualsiasi tipo, il modello le **rielabora** e le ritrova dopo.</sub>
-
 </td>
 <td width="50%" valign="top">
 
+☁️ **Modalità Cloud opzionale**<br>
+<sub>Un tap per passare a **Liara 32B** via API (nessun download, più potenza). Opt-in, consenso esplicito: i dati escono dal dispositivo solo se la attivi.</sub>
+
 🗣️ **Voce offline**<br>
 <sub>Whisper (STT) + Piper (TTS) via sherpa-onnx — gli parli, ti risponde.</sub>
-
-✉️ **Email integrata**<br>
-<sub>IMAP + SMTP su rustls, direttamente dall'app.</sub>
 
 📊 **Grafici e tabelle**<br>
 <sub>Genera grafici (barre, linee, aree, torta) e tabelle direttamente in chat.</sub>
@@ -64,6 +66,8 @@ Nessun cloud, nessun account, funziona anche **senza rete**. I tuoi dati **non e
 </td>
 </tr>
 </table>
+
+Include anche **email** integrata (IMAP + SMTP su rustls) e **appunti** che il modello rielabora e ritrova.
 
 <br>
 
@@ -82,32 +86,23 @@ Ogni strumento sensibile chiede **consenso esplicito**, revocabile da un pannell
 
 <br>
 
-<details>
-<summary><b>📌 Stato & limiti (onestà prima di tutto)</b></summary>
+## 🤖 Modelli
 
-<br>
-
-- **Audio**: gestito da una pipeline **Whisper/Piper** separata — non è audio nativo nel modello.
-- **Visione / input immagini**: il codice è presente ma **non ancora viabile** sull'hardware target (limiti di RAM/GPU on-device) → è **roadmap**, non promessa.
-- **File (`fs_*`)**: completi su desktop, **limitati su Android** (scoped storage).
-- **Non è "il migliore al mondo"**: è ingegneria seria del core, ma l'on-device AI nel 2026 è un campo affollato (Gemma + AI Edge, Apple Intelligence, PocketPal…). Liara punta su **privacy reale** e **codice verificabile**, non su record di benchmark.
-
-</details>
-
-<br>
-
-## 📱 Requisiti
+I modelli si scaricano al primo avvio da HuggingFace — **[`adoslabs/liara-personal-ai`](https://huggingface.co/adoslabs/liara-personal-ai)** — con **resume** del download e verifica **SHA256**. Non sono nel repo.
 
 <table>
-<thead><tr><th align="left">Modello</th><th>RAM consigliata</th><th align="left">Ideale per</th></tr></thead>
+<thead><tr><th align="left">Modello</th><th>Dimensione</th><th>RAM</th><th>Visione</th><th align="left">Note</th></tr></thead>
 <tbody>
-<tr><td>Qwen3 <b>1.5B</b></td><td align="center">~6 GB</td><td>telefoni di fascia media, risposte rapide</td></tr>
-<tr><td>Qwen3 <b>4B</b></td><td align="center">8–12 GB</td><td>flagship, qualità migliore</td></tr>
+<tr><td>🇮🇹 <b>Liara 1.7B</b></td><td align="center">~1,0 GB</td><td align="center">~4–6 GB</td><td align="center">—</td><td>bilanciato, sveglio sugli strumenti</td></tr>
+<tr><td>🇮🇹 <b>Liara 4B</b></td><td align="center">~2,5 GB</td><td align="center">12 GB+</td><td align="center">—</td><td>più capace e preciso (telefoni top)</td></tr>
+<tr><td>💎 <b>Gemma 4 E4B</b></td><td align="center">~5,3 GB</td><td align="center">8 GB+</td><td align="center">✅ nativa</td><td>Google Edge · foto/documenti, anche su Android</td></tr>
+<tr><td>💠 <b>Gemma 4 12B</b></td><td align="center">~7,1 GB</td><td align="center">16 GB+</td><td align="center">✅ nativa</td><td>il più capace · solo desktop</td></tr>
+<tr><td>☁️ <b>Liara Cloud 32B</b></td><td align="center">—</td><td align="center">—</td><td align="center">—</td><td>via API, nessun download · opt-in con consenso</td></tr>
 </tbody>
 </table>
 
-I **modelli non sono nel repo**: si scaricano al primo avvio da `https://nothumanallowed.com/models/`,
-con **resume** del download e verifica **SHA256**. Nessun token, nessun account.
+> 🔜 **In arrivo — Liara 1.58-bit (BitNet ternario).** Un modello **ultra-compatto** in fase di addestramento
+> su un **dataset italiano di tool-calling curato a mano**, pensato per girare anche sui dispositivi più leggeri.
 
 <br>
 
@@ -119,7 +114,7 @@ prefix-caching. `trait` per engine / memory / tool → sottosistemi **swappabili
 
 ```
 app/
-├── src/                 # frontend React/TS (chat, drawer, grafici, voce)
+├── src/                 # frontend React/TS (chat, drawer, grafici, foto, voce)
 └── src-tauri/
     ├── src/core/        # engine · agent · tools · memory · crypto · email · audio
     └── vendor/          # llama.cpp (build patchato per Android)
@@ -150,9 +145,9 @@ uso, studio, modifica e fork liberi **solo per scopi non commerciali**. L'uso co
 licenza separata dal titolare. *(Non è "open source" in senso OSI: l'open source deve permettere anche il
 commerciale.)*
 
-I **modelli e i LoRA sono proprietari**: **non** inclusi nel repo e **non** concessi in licenza per
-redistribuzione, riaddestramento o uso commerciale. Sono il "cervello" del progetto e restano privati.
-Vedi **[`LICENSE.md`](./LICENSE.md)**.
+I **modelli e i LoRA sono proprietari**: pur essendo scaricabili pubblicamente, **non** sono concessi in
+licenza per redistribuzione, riaddestramento o uso commerciale. Sono il "cervello" del progetto e restano
+di proprietà del titolare. Vedi **[`LICENSE.md`](./LICENSE.md)**.
 
 <br>
 

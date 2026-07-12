@@ -11,9 +11,10 @@ The licensor (copyright holder) retains all commercial rights.
 ## ⛔ Models & LoRA weights are NOT covered by this license
 
 The trained models and **LoRA adapters** are **proprietary** and are **not**
-included in this repository. They are downloaded at runtime from
-`https://nothumanallowed.com/models/` and remain the **exclusive property of the
-licensor**. **No license** — commercial or noncommercial — is granted to
+included in this repository. They are downloaded at runtime from the Hugging Face
+repository `adoslabs/liara-personal-ai` and, although publicly downloadable, remain
+the **exclusive property of the licensor**. **No license** — commercial or
+noncommercial — is granted to
 redistribute, republish, retrain, fine-tune-derive, or otherwise reuse the
 model/LoRA weights. All rights reserved.
 
