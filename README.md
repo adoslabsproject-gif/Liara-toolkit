@@ -113,9 +113,13 @@ rinunciare al tool-calling**.
 <img src="media/quantization.svg" alt="Quantizzazione: da FP16 a 1.58-bit ternario" width="92%" />
 </div>
 
-Il suo "cervello" nasce da un **dataset italiano di tool-calling curato a mano**: il **Liara 32B** fa da
-*teacher* e genera gli esempi (chiamate a strumenti, conversazioni, casi limite), che vengono filtrati e usati
-per il **fine-tuning** del modello piccolo.
+Il suo "cervello" nasce da una **pipeline data-centric** su un dataset italiano di tool-calling.
+**Più teacher a rotazione** (Qwen3-32B, Magnum-72B, Gemma-27B + un seed *gold* curato a mano — anti
+style-collapse) generano gli esempi, che attraversano **16 gate** di validazione, dedup semantico e giudizio
+a punteggio, con **esiti tipizzati**: i migliori vanno all'**SFT**, i borderline al **KTO** come negativi.
+Poi il modello piccolo si addestra in **deep fine-tuning** (per il ternario: **QAT/STE** dai master weights
+bf16). Il dataset è **neutro** — reso nel formato tool-call concreto *a training*, così lo stesso corpus
+addestra ternario, Gemma e Qwen.
 
 <div align="center">
 <img src="media/dataset.svg" alt="Generazione del dataset per il fine-tuning" width="92%" />
