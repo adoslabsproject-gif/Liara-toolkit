@@ -2,7 +2,7 @@
 // focalizzato sul comportamento e questi cataloghi vivono in un posto solo, facili da estendere.
 
 export type Role = "user" | "assistant";
-export type Node = { id: string; parentId: string; role: Role; content: string };
+export type Node = { id: string; parentId: string; role: Role; content: string; image?: string };
 export type Msg = { role: Role; content: string };
 export const ROOT = "";
 

@@ -254,8 +254,11 @@ body { background: var(--bg); color: var(--txt); font-family: var(--font); }
 .charttitle { font-weight: 600; font-size: 14px; margin-bottom: 8px; color: var(--txt); }
 
 /* consent modal + permissions */
+/* z-index 300: SOPRA la schermata d'avvio (.load-overlay = 200). Il consenso cloud, attivato dal bottone
+   nella schermata di benvenuto, deve comparire IN CIMA — altrimenti finiva dietro (era 100) e "non faceva
+   nulla". Vale per tutti i modali (consenso, camera): sono dialoghi interattivi, sempre topmost. */
 .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: flex;
-  align-items: center; justify-content: center; z-index: 100; padding: 20px; }
+  align-items: center; justify-content: center; z-index: 300; padding: 20px; }
 .load-overlay { position: fixed; inset: 0; z-index: 200; display: flex; flex-direction: column;
   align-items: center; justify-content: center; gap: 14px; padding: 24px; text-align: center;
   background: var(--bg); }
@@ -269,6 +272,8 @@ body { background: var(--bg); color: var(--txt); font-family: var(--font); }
 .dl-fill { height: 100%; background: linear-gradient(90deg, var(--accent), #9b7bff); border-radius: 6px; transition: width .3s ease; }
 .dl-btn { margin: 16px 0; padding: 13px 26px; border: none; border-radius: 14px; background: linear-gradient(90deg, var(--accent), #9b7bff); color: #fff; font-size: 15px; font-weight: 600; cursor: pointer; }
 .dl-btn:active { opacity: .85; }
+/* Bottone cloud nella schermata d'avvio: si distingue dai modelli locali (contorno accento, sfondo tenue). */
+.dl-cloud { background: color-mix(in srgb, var(--accent) 16%, transparent); color: var(--txt); border: 1.5px solid var(--accent); }
 .dl-retry { padding: 7px 16px; font-size: 13px; margin-left: 8px; }
 .consent { background: var(--panel); border: 1px solid var(--accent); border-radius: 16px;
   padding: 24px; max-width: 380px; text-align: center; animation: pop .15s ease; }
@@ -278,6 +283,10 @@ body { background: var(--bg); color: var(--txt); font-family: var(--font); }
 .consent-action { color: var(--mut); margin: 0 0 18px; line-height: 1.5; }
 .consent-action b { color: var(--txt); }
 .consent-btns { display: flex; flex-direction: column; gap: 8px; }
+/* Thumbnail dell'immagine allegata dentro il bubble del messaggio utente — cliccabile per aprirla. */
+.bubimg { display: block; max-width: 220px; max-height: 220px; width: auto; border-radius: 12px;
+  margin-bottom: 6px; cursor: pointer; border: 1px solid var(--line); object-fit: cover; }
+.lightbox-img { max-width: 92vw; max-height: 88vh; border-radius: 12px; box-shadow: 0 8px 40px rgba(0,0,0,.5); }
 .cammodal { background: var(--panel); border: 1px solid var(--accent); border-radius: 16px;
   padding: 14px; max-width: 92vw; width: 420px; text-align: center; animation: pop .15s ease; }
 .camview { width: 100%; min-height: 240px; max-height: 60vh; border-radius: 12px; background: #000;

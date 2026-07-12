@@ -4,7 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { t, useLang } from "./i18n";
 import { ROOT, TOOL_LABELS } from "./constants";
 import type { Node, Msg } from "./constants";
-import { haptic, speak, stopSpeak, flushSpeak, startRecAndroid, stopRecAndroid, setAndroid, getAndroid } from "./audio";
+import { haptic, speak, stopSpeak, flushSpeak, startRecAndroid, stopRecAndroid, setAndroid, getAndroid, setOnTtsIdle } from "./audio";
 import { isRich, cleanForSpeech, fileIcon } from "./text";
 import { AssistantBody } from "./markdown";
 import { activePath, toMsg, childrenOf as treeChildrenOf, chainTo as treeChainTo } from "./tree";
@@ -48,6 +48,15 @@ export default function App() {
   // il 12B desktop-only finiva nell'APK. Verità dal BACKEND (device_caps, #[cfg(target_os)]). Parte dal
   // guess userAgent e si corregge appena device_caps risponde (istantaneo).
   const [isAndroid, setIsAndroid] = useState(getAndroid());
+  // Settling (solo Android): la WebView, appena appare la chat, resta "bloccata" ~10s mentre si assesta
+  // sotto pressione di memoria (layout + tile). Invece di mostrare una chat che sembra freezata, teniamo
+  // l'animazione di caricamento per qualche secondo — così dà l'idea di stare caricando (non bloccata) e
+  // l'utente non tocca troppo presto (il tap-precoce fa morire il renderer).
+  const [settling, setSettling] = useState(getAndroid());
+  useEffect(() => { if (!settling) return; const tm = setTimeout(() => setSettling(false), 6500); return () => clearTimeout(tm); }, []);
+  // Android: quando la TTS della WebView finisce (coda vuota), nascondi il pulsante "Ferma voce". Su desktop
+  // ci pensa l'evento backend "tts-idle"; su Android il backend non lo emette (voce nella WebView) → serve questo.
+  useEffect(() => { setOnTtsIdle(() => setSpeaking(false)); }, []);
   useEffect(() => {
     invoke<{ android?: boolean }>("device_caps")
       .then((c) => { if (typeof c.android === "boolean") { setIsAndroid(c.android); setAndroid(c.android); } })
@@ -65,6 +74,13 @@ export default function App() {
   // si attiva solo dopo consenso esplicito. OFF di default (Liara è on-device). Vedi commands/remote.rs.
   const [cloudMode, setCloudMode] = useState(() => { try { return localStorage.getItem("liara_cloud") === "1"; } catch { return false; } });
   useEffect(() => { try { localStorage.setItem("liara_cloud", cloudMode ? "1" : "0"); } catch {} }, [cloudMode]);
+  // Cloud attivo (scelto all'avvio o già salvato da una sessione precedente) → NON serve il modello locale:
+  // smonta la schermata di download e l'overlay di caricamento, così l'app è subito usabile via API. Copre
+  // sia l'attivazione dal bottone d'avvio sia il rilancio con cloud già scelto (il backend emette comunque
+  // need-download non sapendo del cloud). Vedi commands/remote.rs.
+  useEffect(() => {
+    if (cloudMode && (md.needDownload || initializing)) { md.setNeedDownload(false); setInitializing(false); }
+  }, [cloudMode, md.needDownload, initializing]);
   // Consenso cloud: modale IN-APP (window.confirm NON funziona nella WebView di Tauri → ritornava
   // sempre false, il cloud restava OFF). Attivandola i dati escono dal dispositivo. Unico per menu+selettore.
   const [cloudAsk, setCloudAsk] = useState(false);
@@ -84,6 +100,8 @@ export default function App() {
   const [camOpen, setCamOpen] = useState(false); // fotocamera aperta (cattura → stessa pipeline visione)
   const camVideoRef = useRef<HTMLVideoElement>(null);
   const camStreamRef = useRef<MediaStream | null>(null);
+  const camInputRef = useRef<HTMLInputElement>(null); // Android: <input capture> → fotocamera NATIVA (la WebView software non disegna il <video>)
+  const [viewImage, setViewImage] = useState<string | null>(null); // lightbox: immagine allegata aperta a schermo intero
   useEffect(() => () => { camStreamRef.current?.getTracks().forEach((tr) => tr.stop()); }, []); // stop camera su unmount
   // Aggancia lo stream al <video> QUANDO è montato (camOpen true). Il preview nero su WKWebView/macOS
   // nasce dall'assegnare srcObject troppo presto o dal non chiamare play(): qui aspettiamo il mount reale
@@ -158,7 +176,13 @@ export default function App() {
       listen<{ downloaded?: number; total?: number; done?: boolean }>("download-progress", (e) => {
         const { downloaded = 0, total = 0, done } = e.payload || {};
         md.setDl((prev) => ({ done: downloaded, total, label: prev?.label }));
-        if (done) { md.setDl(null); md.setNeedDownload(false); setInitializing(true); invoke("warmup").catch(() => {}); }
+        // A fine download: warmup dell'LLM locale SOLO se NON siamo in cloud. In cloud non c'è LLM locale
+        // (es. scaricando i modelli VOCE, questo stesso evento scattava e warmup cercava il gguf → "modello
+        // non trovato"). Leggo localStorage (non lo stato: il listener è montato una volta, cloudMode sarebbe stale).
+        if (done) {
+          md.setDl(null);
+          if (localStorage.getItem("liara_cloud") !== "1") { md.setNeedDownload(false); setInitializing(true); invoke("warmup").catch(() => {}); }
+        }
       }),
       listen<string>("done", () => {
         // flush SINCRONO degli ultimi token in coda prima di azzerare il target (o si perdono)
@@ -312,15 +336,18 @@ export default function App() {
   const childrenOf = (pid: string) => treeChildrenOf(nodes, pid);
   const chainTo = (id: string): Node[] => treeChainTo(nodes, id);
 
-  async function run(messages: Msg[], assistantId: string) {
+  async function run(messages: Msg[], assistantId: string, image?: string | null) {
     setBusy(true);
     streamTarget.current = assistantId;
     speakBuf.current = "";
     if (autoSpeakRef.current) stopSpeak(); // clear any leftover speech before the new turn
     try {
       // Cloud → il 32B via API (stessa firma + stessi eventi token/done/tool del locale, streaming
-      // identico); i tool_call che il 32B restituisce vengono eseguiti in LOCALE dal backend.
-      await invoke(cloudMode ? "remote_generate" : "generate", { messages });
+      // identico); i tool_call che il 32B restituisce vengono eseguiti in LOCALE dal backend. `image`
+      // (data URL) va al 32B (Qwen3-VL) per la visione cloud — il generate locale non la usa (visione
+      // locale = describe_image, flusso a parte).
+      if (cloudMode) await invoke("remote_generate", { messages, image: image ?? null });
+      else await invoke("generate", { messages });
     } catch (err) {
       setNodes((nd) => (nd[assistantId] ? { ...nd, [assistantId]: { ...nd[assistantId], content: "⚠️ " + String(err) } } : nd));
       setBusy(false);
@@ -347,7 +374,7 @@ export default function App() {
     sendText(input.trim());
   }
   function sendText(text: string) {
-    if ((!text && !image) || busy || initializing) return; // niente invii prima che il modello sia pronto
+    if ((!text && !image) || busy || initializing || settling) return; // niente invii prima che il modello sia pronto/assestato
     stoppedRef.current = false; // nuovo turno: riabilita lo streaming dei token
     haptic(18);
     setInput("");
@@ -355,8 +382,7 @@ export default function App() {
     const parent = path.length ? path[path.length - 1].id : ROOT;
     const uid = crypto.randomUUID();
     const aid = crypto.randomUUID();
-    const shown = text || (image ? t("🖼️ (immagine)", "🖼️ (image)") : "");
-    const userNode: Node = { id: uid, parentId: parent, role: "user", content: shown };
+    const userNode: Node = { id: uid, parentId: parent, role: "user", content: text, image: image || undefined };
     // 🔴 FIX CRASH CONVERSAZIONE (2026-07-04): il contesto accumulato faceva esplodere il prefill
     // (fino a 100s misurati) → il prompt sfondava n_ctx (4096) → llama.cpp fa throw → Rust non può
     // catturare l'eccezione C++ → abort() dell'app ("Rust cannot catch foreign exceptions"). E un
@@ -378,7 +404,10 @@ export default function App() {
       const img = image;
       setImage(null);
       setAttachments([]);
-      runVision(img, text, aid);
+      // Cloud → l'immagine va al 32B (Qwen3-VL) dentro run/remote_generate. Locale → visione on-device
+      // (describe_image col Gemma), flusso separato.
+      if (cloudMode) run(msgs, aid, img);
+      else runVision(img, text, aid);
     } else {
       run(msgs, aid);
     }
@@ -517,8 +546,9 @@ export default function App() {
     const file = e.target.files?.[0];
     e.target.value = "";
     if (!file) return;
-    // images → vision (Qwen2.5-VL); only one at a time.
-    if (file.type.startsWith("image/")) {
+    // images → vision. Riconosci l'immagine anche se il MIME è vuoto (alcune camere Android restituiscono
+    // type="" ) usando l'estensione del nome — altrimenti finiva nel ramo documento e non arrivava alla visione.
+    if (file.type.startsWith("image/") || /\.(jpe?g|png|webp|heic|heif|gif|bmp)$/i.test(file.name)) {
       // Ridimensiona a max 1024px PRIMA di inviare: una foto da 12MP genera migliaia di token
       // immagine → la RAM del telefono esplode (OOM) e l'app crasha. 1024px basta per descriverla
       // bene e regge la memoria. Riencode in JPEG q0.85 per ridurre anche la dimensione del base64.
@@ -649,6 +679,7 @@ export default function App() {
                   </div>
                 ) : (
                   <div className="bubble">
+                    {n.image && <img src={n.image} className="bubimg" alt={t("allegato", "attachment")} onClick={() => setViewImage(n.image!)} />}
                     {n.content
                       ? (n.role === "assistant" ? <AssistantBody text={n.content} /> : n.content)
                       : streaming
@@ -685,7 +716,7 @@ export default function App() {
         })}
         {status && <div className="status">{status}</div>}
       </div>
-      <LoadOverlays md={md} initializing={initializing} status={status} />
+      <LoadOverlays md={md} initializing={initializing} settling={settling} status={status} onUseCloud={() => setCloudAsk(true)} />
 
       {navHint && <div className="navhint">{navHint}</div>}
       {speaking && (
@@ -723,14 +754,18 @@ export default function App() {
           onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
           placeholder={busy ? t("Liara sta rispondendo… premi ■ per fermarla", "Liara is replying… press ■ to stop her") : t("Scrivi un messaggio…  (Invio per inviare)", "Type a message…  (Enter to send)")}
           rows={1}
-          disabled={busy || initializing}
+          disabled={busy || initializing || settling}
         />
         <input ref={fileRef} type="file" accept="image/*,.pdf,.txt,.md,.csv,.json,.log,.rs,.py,.js,.ts" style={{ display: "none" }} onChange={handleFile} />
-        {!busy && md.hasVision && (
+        {/* Android: fotocamera NATIVA (capture) → apre l'app camera del telefono e restituisce la foto come
+            file (poi handleFile la tratta come un'immagine allegata). Evita il <video> getUserMedia che sulla
+            WebView software (hardwareAccelerated=false) resta NERO. Su desktop invece si usa il preview live. */}
+        <input ref={camInputRef} type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={handleFile} />
+        {!busy && (md.hasVision || cloudMode) && (
           <button className="send attach" title={t("Allega documento (lo indicizzo per risponderti)", "Attach a document (I'll index it to answer you)")} onClick={() => fileRef.current?.click()}>📎</button>
         )}
-        {!busy && md.hasVision && (
-          <button className="send attach" title={t("Scatta una foto e la analizzo", "Take a photo and I'll analyse it")} onClick={openCamera}>📷</button>
+        {!busy && (md.hasVision || cloudMode) && (
+          <button className="send attach" title={t("Scatta una foto e la analizzo", "Take a photo and I'll analyse it")} onClick={() => isAndroid ? camInputRef.current?.click() : openCamera()}>📷</button>
         )}
         {!busy && (() => {
           const micStart = async () => {
@@ -801,9 +836,22 @@ export default function App() {
               "Far more capable, but your messages and the data the assistant reads (files, memory, location, photos) are sent to the server. It's no longer fully on-device.")}</p>
             <div className="consent-btns">
               <button className="ghost" onClick={() => { setCloudAsk(false); haptic(12); }}>{t("Annulla", "Cancel")}</button>
-              <button className="send-sm" onClick={() => { setCloudMode(true); setCloudAsk(false); md.setSwitchTo(t("Liara Cloud 32B ☁️", "Liara Cloud 32B ☁️")); haptic(20); }}>{t("☁️ Attiva cloud", "☁️ Enable cloud")}</button>
+              <button className="send-sm" onClick={() => {
+                // Cloud ON = ISTANTANEO, NIENTE riavvio. remote_generate non tocca l'engine locale → non c'è
+                // nulla da liberare col riavvio. Il vecchio setSwitchTo chiudeva l'app (exit_app) → l'utente
+                // lo leggeva come un CRASH ("has died", chiusura pulita nel logcat). Ora si entra in cloud
+                // sul posto: l'effect [cloudMode] smonta gli eventuali overlay d'avvio. (Il riavvio resta
+                // solo per lo switch tra modelli LOCALI e per tornare al locale, dove serve ricaricare l'engine.)
+                setCloudMode(true); setCloudAsk(false); haptic(20);
+              }}>{t("☁️ Attiva cloud", "☁️ Enable cloud")}</button>
             </div>
           </div>
+        </div>
+      )}
+
+      {viewImage && (
+        <div className="modal-overlay" onClick={() => setViewImage(null)}>
+          <img src={viewImage} className="lightbox-img" alt={t("allegato", "attachment")} onClick={(e) => e.stopPropagation()} />
         </div>
       )}
 

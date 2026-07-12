@@ -30,6 +30,9 @@ const CLOUD_SYSTEM_PROMPT: &str =
 Usa gli strumenti quando servono per AGIRE o per dati reali (email, agenda, file, web, meteo, note, calcoli, data/ora). \
 Per SPOSTARE o RIPROGRAMMARE un appuntamento esistente: prima calendar_delete quello vecchio (per id), POI calendar_add \
 il nuovo orario — NON fare solo calendar_add o crei un DOPPIONE. \
+Puoi VEDERE le immagini e le foto che l'utente allega: quando ne arriva una, analizzala direttamente e \
+descrivi con precisione cosa contiene. NON dire MAI che non puoi vedere immagini, foto, webcam o video — \
+sei un modello multimodale e le vedi eccome. \
 Sei anche una compagna con cui parlare: a domande, opinioni, chiacchiere, spiegazioni rispondi NORMALMENTE, \
 con calore e personalità — non serve uno strumento per conversare. \
 Se l'utente chiede un GRAFICO (torta/barre/linee): NON usare strumenti e NON fare calcoli, scrivi TU direttamente \
@@ -97,6 +100,7 @@ fn call_once(
 #[tauri::command]
 pub async fn remote_generate(
     messages: Vec<Message>,
+    image: Option<String>, // data URL (data:image/…;base64,…) di una foto/allegato → visione del 32B (Qwen3-VL)
     state: State<'_, AppState>,
     window: WebviewWindow,
 ) -> Result<String, String> {
@@ -113,8 +117,19 @@ pub async fn remote_generate(
         // teniamo locale in una fase successiva, per non spedire ogni query di memoria al server.)
         let system = format!("{}{}", CLOUD_SYSTEM_PROMPT, memory.profile_block());
         let mut msgs: Vec<Value> = vec![json!({ "role": "system", "content": system })];
-        for m in &messages {
-            msgs.push(json!({ "role": m.role, "content": m.content }));
+        // Se c'è un'immagine, va sull'ULTIMO messaggio utente in formato OpenAI vision (content = array
+        // [testo, image_url]) — il 32B è Qwen3-VL e la legge (verificato: descrive l'immagine). Gli altri
+        // messaggi restano testo semplice.
+        let last_user_idx = messages.iter().rposition(|m| m.role == "user");
+        for (i, m) in messages.iter().enumerate() {
+            if image.is_some() && Some(i) == last_user_idx {
+                msgs.push(json!({ "role": m.role, "content": [
+                    { "type": "text", "text": m.content },
+                    { "type": "image_url", "image_url": { "url": image.as_deref().unwrap_or("") } },
+                ]}));
+            } else {
+                msgs.push(json!({ "role": m.role, "content": m.content }));
+            }
         }
         let tool_defs = tools.openai_tools();
         let url = api_url();

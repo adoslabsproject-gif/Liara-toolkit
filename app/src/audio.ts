@@ -20,12 +20,21 @@ export function haptic(pattern: number | number[] = 30) {
 let ttsQ: string[] = [];          // code di URL WAV in attesa
 let ttsBusy = false;
 let ttsEl: HTMLAudioElement | null = null;
+// Callback "TTS ferma": su Android la voce suona nella WebView (non da rodio), quindi il backend NON emette
+// mai "tts-idle" (scarta on_idle). Senza questo, `speaking` restava true e il pulsante "Ferma voce" non
+// spariva mai a fine parlato. Lo chiamiamo quando la coda si svuota. App.tsx lo lega a setSpeaking(false).
+let onTtsIdleCb: (() => void) | null = null;
+export function setOnTtsIdle(cb: () => void) { onTtsIdleCb = cb; }
 function ttsNext() {
   if (ttsBusy || ttsQ.length === 0) return;
   ttsBusy = true;
   const url = ttsQ.shift()!;
   ttsEl = new Audio(url);
-  const done = () => { URL.revokeObjectURL(url); ttsBusy = false; ttsEl = null; ttsNext(); };
+  const done = () => {
+    URL.revokeObjectURL(url); ttsBusy = false; ttsEl = null;
+    ttsNext();
+    if (!ttsBusy && ttsQ.length === 0) onTtsIdleCb?.(); // coda vuota → TTS finita → nascondi "Ferma voce"
+  };
   ttsEl.onended = done;
   ttsEl.onerror = done;
   ttsEl.play().catch(done);

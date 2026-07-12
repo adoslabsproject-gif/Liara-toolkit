@@ -4,18 +4,18 @@ import { invoke } from "@tauri-apps/api/core";
 import { t } from "./i18n";
 import type { ModelDownloadApi } from "./useModelDownload";
 
-export function LoadOverlays({ md, initializing, status }: { md: ModelDownloadApi; initializing: boolean; status: string }) {
+export function LoadOverlays({ md, initializing, settling, status, onUseCloud }: { md: ModelDownloadApi; initializing: boolean; settling: boolean; status: string; onUseCloud: () => void }) {
   return (
     <>
-      {(initializing || status.startsWith("Carico il modello") || status.startsWith("Loading the local model")) && (
+      {(initializing || settling || status.startsWith("Carico il modello") || status.startsWith("Loading the local model")) && (
         <div className="load-overlay">
           <div className="load-spinner" />
           <div className="load-title">{t("Avvio Liara…", "Starting Liara…")}</div>
-          <div className="load-sub">{status || t("Preparo il modello locale…", "Preparing the local model…")}</div>
-          <div className="load-hint">{t("Sto caricando il modello in memoria. L'app è pronta appena sparisce questa schermata.", "Loading the model into memory. The app is ready as soon as this screen disappears.")}</div>
+          <div className="load-sub">{status || t("Mi sto assestando…", "Getting ready…")}</div>
+          <div className="load-hint">{t("Un istante: preparo tutto. Sono pronta appena sparisce questa schermata.", "One moment: getting everything ready. I'm ready as soon as this screen disappears.")}</div>
         </div>
       )}
-      {md.needDownload && (
+      {md.needDownload && !settling && (
         <div className="load-overlay">
           <div className="load-title">{t("Benvenuto in Liara 👋", "Welcome to Liara 👋")}</div>
           <div className="load-sub">{t("Scegli il modello da scaricare (una volta sola — lo cambi quando vuoi dalle Impostazioni):", "Choose the model to download (just once — you can change it anytime in Settings):")}</div>
@@ -27,6 +27,12 @@ export function LoadOverlays({ md, initializing, status }: { md: ModelDownloadAp
             </div>
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: 12, width: "86%", maxWidth: 360 }}>
+              {/* Opzione cloud: parti SUBITO senza scaricare nulla (il 32B gira sul server). I dati escono
+                  dal dispositivo → l'attivazione passa dal consenso (onUseCloud apre il modale). */}
+              <button className="dl-btn dl-cloud" style={{ margin: 0, textAlign: "left", lineHeight: 1.35 }} onClick={onUseCloud}>
+                ☁️ <b>{t("Liara Cloud (32B)", "Liara Cloud (32B)")}</b> · {t("subito, niente da scaricare", "start now, nothing to download")}<br />
+                <small style={{ fontWeight: 400, opacity: .9 }}>{t("La più capace · via internet · i dati escono dal dispositivo", "The most capable · over the internet · data leaves the device")}</small>
+              </button>
               {md.visibleModels.map((m) => (
                 <button key={m.id} className="dl-btn" style={{ margin: 0, textAlign: "left", lineHeight: 1.35 }} onClick={() => md.startDownload(m)}>
                   {m.flag} {m.icon} <b>{m.size}</b> · ~{m.gb}<br />
