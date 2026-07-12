@@ -55,6 +55,69 @@ fn api_model() -> String {
     std::env::var("LIARA_API_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string())
 }
 
+/// Primo oggetto JSON bilanciato in `s` (gestisce annidamento e stringhe con escape).
+fn first_json_object(s: &str) -> Option<String> {
+    let start = s.find('{')?;
+    let b = s.as_bytes();
+    let (mut depth, mut in_str, mut esc) = (0i32, false, false);
+    for i in start..s.len() {
+        let c = b[i] as char;
+        if in_str {
+            if esc { esc = false } else if c == '\\' { esc = true } else if c == '"' { in_str = false }
+            continue;
+        }
+        match c {
+            '"' => in_str = true,
+            '{' => depth += 1,
+            '}' => { depth -= 1; if depth == 0 { return Some(s[start..=i].to_string()); } }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Da un oggetto JSON costruisce un tool_call in formato OpenAI (arguments STRINGA). Gestisce ENTRAMBI i
+/// formati che il 32B produce: `{"name":…,"arguments":{…}}` (standard) e `{"name":"web_search","query":…}`
+/// (argomenti come FRATELLI di name — visto nel leak). Nel secondo caso, args = tutti i campi tranne "name".
+fn tc_from_obj(obj: &str, idx: usize) -> Option<Value> {
+    let v: Value = serde_json::from_str(obj).ok()?;
+    let name = v.get("name").and_then(|n| n.as_str())?;
+    let args = match v.get("arguments") {
+        Some(a) => a.clone(),
+        None => {
+            let mut m = v.as_object().cloned().unwrap_or_default();
+            m.remove("name");
+            Value::Object(m)
+        }
+    };
+    let args_str = args.as_str().map(|s| s.to_string()).unwrap_or_else(|| args.to_string());
+    Some(json!({ "id": format!("call_{idx}"), "type": "function",
+        "function": { "name": name, "arguments": args_str } }))
+}
+
+/// FALLBACK: estrae i tool-call dal TESTO del content, per quando il server li mette lì invece che nel
+/// campo strutturato `tool_calls` (il 32B a volte emette `<tool_call>{…}</tool_call>`, a volte JSON NUDO).
+/// Senza questo, la chiamata veniva MOSTRATA come testo e MAI eseguita → il modello poi inventava i risultati.
+fn parse_tool_calls_from_text(raw: &str) -> Vec<Value> {
+    let mut out = Vec::new();
+    let mut cur = raw;
+    while let Some(p) = cur.find("<tool_call>") {
+        let after = &cur[p + "<tool_call>".len()..];
+        match first_json_object(after) {
+            Some(obj) => { if let Some(tc) = tc_from_obj(&obj, out.len()) { out.push(tc); } cur = after; }
+            None => break,
+        }
+    }
+    // JSON nudo (senza tag): tutto il content è un oggetto {"name":…,"arguments":…}
+    if out.is_empty() {
+        let t = raw.trim();
+        if t.starts_with('{') && t.contains("\"name\"") && t.contains("\"arguments\"") {
+            if let Some(obj) = first_json_object(t) { if let Some(tc) = tc_from_obj(&obj, 0) { out.push(tc); } }
+        }
+    }
+    out
+}
+
 /// UNA chiamata al 32B (NON-streaming). ⚠️ `stream:false` è OBBLIGATORIO per l'AFFIDABILITÀ dei tool: in
 /// streaming il 32B NON è coerente nel formato del tool-call (a volte `<tool_call>{…}`, a volte JSON NUDO
 /// `{"name":…,"arguments":…}`) → non li catturavamo → il tool NON partiva (es. appuntamento non salvato).
@@ -87,12 +150,19 @@ fn call_once(
         .map_err(|e| anyhow::anyhow!("lettura risposta API: {e}"))?;
     let v: Value = serde_json::from_str(&raw).map_err(|e| anyhow::anyhow!("JSON API: {e}"))?;
     let msg = &v["choices"][0]["message"];
-    let content = msg["content"].as_str().unwrap_or("").to_string();
-    // emetti il testo del modello (sui giri con solo tool-call è vuoto; sul giro finale è la risposta)
-    if !content.is_empty() {
+    let mut content = msg["content"].as_str().unwrap_or("").to_string();
+    let mut tool_calls = msg["tool_calls"].as_array().cloned().unwrap_or_default();
+    // FALLBACK: nessun tool_call strutturato ma la chiamata è NEL testo (<tool_call>… o JSON nudo) → estraila
+    // e NON mostrarla (era una chiamata, non una risposta). Così il tool parte per davvero → niente più
+    // "<tool_call>…" a schermo e niente risultati inventati dal modello.
+    if tool_calls.is_empty() {
+        let parsed = parse_tool_calls_from_text(&content);
+        if !parsed.is_empty() { tool_calls = parsed; content.clear(); }
+    }
+    // emetti il testo SOLO se è una vera risposta finale (nessun tool da eseguire)
+    if !content.is_empty() && tool_calls.is_empty() {
         sink.on_token(&content);
     }
-    let tool_calls = msg["tool_calls"].as_array().cloned().unwrap_or_default();
     Ok((content, tool_calls))
 }
 
