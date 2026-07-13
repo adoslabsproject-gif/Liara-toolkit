@@ -85,6 +85,14 @@ pub fn run() {
             std::fs::create_dir_all(&dir).ok();
             let _ = std::fs::remove_file(dir.join("boot.log")); // log pulito ad ogni avvio
             boot_log(&dir, "1-start");
+            // macOS (Apple Silicon, macOS 26.1): i "residency sets" di Metal — feature ggml ≥ macOS 15, con
+            // un thread heartbeat in background — lanciano un'eccezione ObjC/Metal durante l'inferenza sul
+            // M4 Pro → risale oltre il confine FFI in Rust ("foreign exception") → abort dell'app (crash
+            // chiedendo appuntamenti/memoria). Li DISABILITIAMO col flag integrato di ggml: il modello gira
+            // comunque su GPU Metal (percorso classico, pre-residency-sets), zero perdita pratica con 48GB.
+            // Va settato PRIMA che il backend Metal si inizializzi (al primo load del modello).
+            #[cfg(target_os = "macos")]
+            std::env::set_var("GGML_METAL_NO_RESIDENCY", "1");
             // Android: i modelli vivono nella cartella dati INTERNA dell'app (la possiede al 100%,
             // niente problemi di scoped-storage). In dev li spingiamo via `adb run-as`; in produzione
             // li copieremo qui dagli asset dell'APK al primo avvio.

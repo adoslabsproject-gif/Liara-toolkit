@@ -105,7 +105,13 @@ pub fn run_agent(
     // SOLO Qwen: Gemma emette il SUO formato nativo (`<|tool_call>call:…`), su cui la grammar Qwen
     // (ancorata a `<tool_call>` senza pipe) non scatterebbe comunque — la teniamo spenta per non
     // rischiare interferenze e lasciare Gemma libero di produrre il dialetto che il parser capisce.
-    let grammar = (!registry.is_empty() && !gemma).then(|| registry.tool_call_grammar());
+    // ⚠️ GBNF DISATTIVATA per default (2026-07-13): il `sampler.sample()` con la grammatica lanciava
+    // un'eccezione C++ durante la generazione di un tool-call (crash "foreign exception" chiedendo gli
+    // appuntamenti, IDENTICO su macOS e Windows → NON è il backend, è la grammatica CPU-side). Il modello
+    // LoRA produce comunque il formato `<tool_call>{…}` da addestramento e il parser lo estrae. Riattivabile
+    // con LIARA_GBNF=1 per testare/confrontare.
+    let grammar = (!registry.is_empty() && !gemma && std::env::var("LIARA_GBNF").is_ok())
+        .then(|| registry.tool_call_grammar());
 
     for _ in 0..5 {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
