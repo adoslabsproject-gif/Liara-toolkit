@@ -61,3 +61,36 @@ pub fn set_gps(latitude: f64, longitude: f64, state: State<AppState>) -> Result<
     // a fresh device GPS fix; overrides a manual correction (per the user's wish)
     state.memory.set_location(latitude, longitude, "posizione GPS", "gps").map_err(|e| e.to_string())
 }
+
+/// Posizione corrente per la UI Impostazioni: (label, source) con source ∈ {"gps","manual"}. None se assente.
+#[tauri::command]
+pub fn get_location(state: State<AppState>) -> Option<(String, String)> {
+    state.memory.location_display()
+}
+
+/// ID di rete di questo Liara (per la chat AI↔AI). È la CHIAVE PUBBLICA X25519 (base64url), stabile
+/// per-dispositivo e base dell'E2E — la stessa che `peer_identity` restituisce. Manteniamo il nome
+/// storico per il NetDrawer; il Milestone 1 (ID casuale) è superato dall'identità crittografica reale.
+#[tauri::command]
+pub fn my_network_id(state: State<AppState>) -> Result<String, String> {
+    Ok(state.peer.public_id().to_string())
+}
+
+/// Posizione MANUALE: l'utente scrive una città → geocoding (Open-Meteo) → salva con source "manual".
+/// Il bottone "Sincronizza" nel frontend rimette invece quella GPS (set_gps → source "gps").
+#[tauri::command]
+pub async fn set_manual_location(city: String, state: State<'_, AppState>) -> Result<String, String> {
+    let city = city.trim().to_string();
+    if city.is_empty() {
+        return Err("Città vuota".into());
+    }
+    let memory = state.memory.clone();
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let (lat, lon, label) = crate::core::tools::builtin::weather::geocode(&city)
+            .map_err(|e| format!("Luogo non trovato: {e}"))?;
+        memory.set_location(lat, lon, &label, "manual").map_err(|e| e.to_string())?;
+        Ok(label)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}

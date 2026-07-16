@@ -11,6 +11,7 @@ mod eval;
 pub mod extract;
 pub mod mcp;
 pub mod paths;
+pub mod peer;
 pub mod engine;
 pub mod memory;
 pub mod tools;

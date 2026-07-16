@@ -38,10 +38,22 @@ pub fn delete_model(files: Vec<String>) -> Result<u32, String> {
     Ok(deleted)
 }
 
-/// I modelli audio (TTS/STT) sono presenti sul dispositivo? (guardia sul file chiave silero_vad.onnx)
+/// I modelli audio (TTS/STT) sono presenti E aggiornati? La guardia è il modello Kokoro: esiste SOLO
+/// nel bundle nuovo (voce Kokoro + whisper-small). Così chi ha ancora il bundle vecchio (Piper +
+/// whisper-base, con silero ma senza Kokoro) risulta "assente" e riscarica quello nuovo.
+fn audio_ready() -> bool {
+    let a = models_base().join("audio");
+    let kokoro = a.join("kokoro-multi-lang-v1_0");
+    // il lexicon è la guardia della v3: la v2 (senza lexicon/dict) faceva ABORTARE Kokoro all'ascolto →
+    // chi ha la v2 rotta risulta "assente" e riscarica la v3 corretta.
+    kokoro.join("model.onnx").exists()
+        && kokoro.join("lexicon-us-en.txt").exists()
+        && a.join("sherpa-onnx-whisper-small").join("small-encoder.int8.onnx").exists()
+}
+
 #[tauri::command]
 pub fn audio_present() -> bool {
-    models_base().join("audio").join("silero_vad.onnx").exists()
+    audio_ready()
 }
 
 /// Estrae `liara-audio.zip` (scaricato on-demand da GitHub in models_base) dentro `models/audio`, poi
@@ -51,12 +63,12 @@ pub fn audio_present() -> bool {
 #[tauri::command]
 pub fn extract_audio() -> Result<(), String> {
     let base = models_base();
-    if base.join("audio").join("silero_vad.onnx").exists() {
-        return Ok(()); // già estratto
+    if audio_ready() {
+        return Ok(()); // già estratto (bundle nuovo)
     }
-    let zip_path = base.join("liara-audio.zip");
+    let zip_path = base.join("liara-audio-v3.zip");
     if !zip_path.exists() {
-        return Err("liara-audio.zip non trovato: scaricalo prima".into());
+        return Err("liara-audio-v3.zip non trovato: scaricalo prima".into());
     }
     let file = std::fs::File::open(&zip_path).map_err(|e| format!("apro zip: {e}"))?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("leggo zip: {e}"))?;
@@ -75,7 +87,13 @@ pub fn extract_audio() -> Result<(), String> {
             std::io::copy(&mut entry, &mut outf).map_err(|e| format!("estraggo: {e}"))?;
         }
     }
-    let _ = std::fs::remove_file(&zip_path); // libera i ~350MB dello zip dopo l'estrazione
+    let _ = std::fs::remove_file(&zip_path); // libera lo spazio dello zip dopo l'estrazione
+    // Upgrade dal bundle vecchio: rimuovi i modelli Piper/whisper-base ormai inutilizzati (~500MB)
+    // per non lasciarli a occupare spazio sul device. Sicuro: sono cartelle nostre, non più referenziate.
+    let audio = base.join("audio");
+    for old in ["vits-piper-it_IT-paola-medium", "sherpa-onnx-whisper-base"] {
+        let _ = std::fs::remove_dir_all(audio.join(old));
+    }
     Ok(())
 }
 

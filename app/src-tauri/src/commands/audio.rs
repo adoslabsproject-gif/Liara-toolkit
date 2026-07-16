@@ -53,6 +53,28 @@ pub fn tts_speak(text: String, state: State<AppState>) {
     state.tts.speak(&text); // queued, plays in order (streaming-friendly)
 }
 
+/// Voce TTS corrente (sid Kokoro): 35 = Sara (F), 36 = Nicola (M). Vedi core::audio::configured_sid.
+#[tauri::command]
+pub fn get_tts_voice() -> i32 {
+    crate::core::audio::configured_sid()
+}
+
+/// Cambia la voce TTS e invalida ENTRAMBE le cache (queue desktop + engine WebView) così la
+/// prossima frase parla con la nuova voce senza riavviare l'app.
+#[tauri::command]
+pub fn set_tts_voice(sid: i32, state: State<AppState>) -> Result<(), String> {
+    let path = crate::core::paths::models_base().join("tts_voice");
+    if let Some(d) = path.parent() {
+        std::fs::create_dir_all(d).ok();
+    }
+    std::fs::write(&path, sid.to_string()).map_err(|e| e.to_string())?;
+    if let Some(slot) = TTS_ENGINE.get() {
+        *slot.lock().unwrap() = None; // Android WebView engine
+    }
+    state.tts.reload(); // coda desktop
+    Ok(())
+}
+
 #[tauri::command]
 pub fn tts_stop(state: State<AppState>) {
     state.tts.stop();

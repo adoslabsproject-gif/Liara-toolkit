@@ -1,7 +1,7 @@
 //! Tool layer: trait + registry + built-ins.
 //! Uses Qwen's native tool-call format (the model is trained on it) and is ready
 //! for GBNF hardening. External MCP servers plug into the same registry later.
-mod builtin;
+pub(crate) mod builtin; // geocode (weather) riusato da commands::memory::set_manual_location
 mod registry;
 pub use registry::ToolRegistry;
 

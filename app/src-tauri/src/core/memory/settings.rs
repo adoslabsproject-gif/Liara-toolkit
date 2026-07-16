@@ -33,6 +33,21 @@ impl Memory {
         ))
     }
 
+    /// Posizione per la UI Impostazioni: (label, source) — source ∈ {"gps","manual"}. None se non impostata.
+    pub fn location_display(&self) -> Option<(String, String)> {
+        let enc: String = self
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT value FROM settings WHERE key='location'", [], |r| r.get(0))
+            .ok()?;
+        let j: serde_json::Value = serde_json::from_str(&self.crypto.decrypt(&enc)).ok()?;
+        Some((
+            j.get("label")?.as_str()?.to_string(),
+            j.get("source").and_then(|s| s.as_str()).unwrap_or("manual").to_string(),
+        ))
+    }
+
     // --- per-tool consent (allow | ask | deny), persisted ---
 
     pub fn get_permission(&self, tool: &str) -> Option<String> {

@@ -69,9 +69,15 @@ let recCtx: AudioContext | null = null;
 let recStream: MediaStream | null = null;
 let recProc: ScriptProcessorNode | null = null;
 let recChunks: Float32Array[] = [];
+let recCancelled = false; // #5b: se stopRec arriva PRIMA che getUserMedia risolva (tap veloce), rilasciamo il mic
 export async function startRecAndroid() {
   recChunks = [];
-  recStream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+  recCancelled = false;
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+  // Race: se nel frattempo è stato chiesto lo stop (pointerup arrivato durante il getUserMedia), NON tenere
+  // il mic aperto — fermalo subito. Senza questo, un tap veloce lasciava il microfono occupato per sempre.
+  if (recCancelled) { stream.getTracks().forEach((tr) => tr.stop()); recStream = null; return; }
+  recStream = stream;
   recCtx = new AudioContext({ sampleRate: 16000 });
   const src = recCtx.createMediaStreamSource(recStream);
   recProc = recCtx.createScriptProcessor(4096, 1, 1);
@@ -80,6 +86,7 @@ export async function startRecAndroid() {
   recProc.connect(recCtx.destination);
 }
 export function stopRecAndroid(): { pcm: number[]; rate: number } {
+  recCancelled = true; // se startRecAndroid è ancora dentro getUserMedia, rilascerà lo stream appena arriva
   const rate = Math.round(recCtx?.sampleRate ?? 16000);
   try { recProc?.disconnect(); } catch { /* ok */ }
   recStream?.getTracks().forEach((tr) => tr.stop());

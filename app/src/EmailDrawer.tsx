@@ -9,7 +9,7 @@ export function EmailDrawer({ email, onBack }: { email: EmailApi; onBack: () => 
   const {
     setShowEmail, showCfg, setShowCfg, provider, pickProvider, emailCfg, setCfg, showPw, setShowPw,
     saveCfg, cfgMsg, compose, setCompose, sendCompose, sendStatus, fetchEmails, startCompose, folder,
-    switchFolder, unread, mailStatus, mailHelp, openMail, setOpenMail, startReply, emails, emptyTrash,
+    switchFolder, unread, mailStatus, mailLoading, mailHelp, openMail, setOpenMail, startReply, emails, emptyTrash,
     readMail, restoreMail, purgeMail, delMail,
   } = email;
   return (
@@ -56,8 +56,10 @@ export function EmailDrawer({ email, onBack }: { email: EmailApi; onBack: () => 
         ) : (
           <>
             <div className="emailbar">
-              <button className="ghost" onClick={fetchEmails}>⬇︎ {t("Scarica", "Download")}</button>
-              <button className="ghost" onClick={startCompose}>✍️ {t("Scrivi", "Compose")}</button>
+              <button className="ghost" onClick={fetchEmails} disabled={mailLoading}>
+                {mailLoading ? <><span className="spin" />{t("Scarico…", "Downloading…")}</> : <>⬇︎ {t("Scarica", "Download")}</>}
+              </button>
+              <button className="ghost" onClick={startCompose} disabled={mailLoading}>✍️ {t("Scrivi", "Compose")}</button>
             </div>
             <div className="folders">
               {([["INBOX", "📥", t("In arrivo", "Inbox")], ["SENT", "📤", t("Inviate", "Sent")], ["TRASH", "🗑️", t("Cestino", "Trash")]] as const).map(([f, ic, label]) => (
@@ -67,7 +69,9 @@ export function EmailDrawer({ email, onBack }: { email: EmailApi; onBack: () => 
                 </button>
               ))}
             </div>
-            {mailStatus && <p className="hint">{mailStatus}</p>}
+            {mailLoading
+              ? <p className="hint mailloading"><span className="spin" />{t("Scarico le email dal server…", "Downloading emails from the server…")}</p>
+              : mailStatus && <p className="hint">{mailStatus}</p>}
             {mailHelp && (() => {
               const h = PROVIDER_HELP[provider] || { title: "Configurazione email", titleEn: "Email configuration", note: "Usa la password della casella e assicurati che l'accesso IMAP sia abilitato.", noteEn: "Use your mailbox password and make sure IMAP access is enabled." };
               return (

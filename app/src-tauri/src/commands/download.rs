@@ -187,6 +187,21 @@ pub async fn set_active_model(filename: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Flag `cloud_active`: se presente, al boot NON si carica il modello LOCALE (Liara via API → risparmia
+/// RAM e calore). Lo scrive il frontend quando il cloud viene attivato, lo rimuove quando si torna al
+/// locale. Letto in `spawn_warmup` (lib.rs).
+#[tauri::command]
+pub async fn set_cloud_active(on: bool) -> Result<(), String> {
+    let f = crate::core::paths::models_base().join("cloud_active");
+    if on {
+        std::fs::create_dir_all(f.parent().unwrap()).ok();
+        std::fs::write(&f, "1").map_err(|e| format!("scrivo flag cloud: {e}"))
+    } else {
+        let _ = std::fs::remove_file(&f); // assente = locale; ok se non c'era
+        Ok(())
+    }
+}
+
 /// Nome del GGUF attualmente selezionato (stringa vuota = default 4B).
 #[tauri::command]
 pub async fn active_model() -> String {

@@ -41,6 +41,10 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 html2text = "0.6"
 mailparse = "0.15"
 aes-gcm = "0.10"
+# E2E per la chat peer (Liara↔Liara): NaCl crypto_box = X25519 + XSalsa20-Poly1305 (pure-Rust,
+# builda su Android). Identità = keypair X25519, la pubblica è l'ID condiviso via QR; il relay
+# instrada solo ciphertext. Box statico autenticato (M2); il forward-secrecy double-ratchet è M4.
+crypto_box = { version = "0.9", features = ["std"] }
 rand = "0.8"
 base64 = "0.22"
 # audio subsystem: Piper TTS + whisper STT (sherpa-onnx, local, cross-platform), mic + playback

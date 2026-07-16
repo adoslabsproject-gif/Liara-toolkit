@@ -303,9 +303,12 @@ pub async fn warmup(state: State<'_, AppState>, window: WebviewWindow) -> Result
 #[tauri::command]
 pub async fn generate(
     messages: Vec<Message>,
+    max_tokens: Option<usize>, // budget risposta scelto dall'utente (preset per-dispositivo); None = default
     state: State<'_, AppState>,
     window: WebviewWindow,
 ) -> Result<String, String> {
+    // clamp di sicurezza per il LOCALE (desktop/mobile): mai sotto 128, mai oltre 8192 (contesto modelli locali)
+    let max_tokens = max_tokens.unwrap_or(1024).clamp(128, 8192);
     let model_path = crate::core::paths::text_model(); // rilegge il modello ATTIVO (active_model), non il default fissato all'avvio
     let engine_slot = state.engine.clone();
     let memory = state.memory.clone();
@@ -384,6 +387,7 @@ pub async fn generate(
             &system,
             &messages,
             thinking,
+            max_tokens,
             &cancel,
             &mut sink,
         )?;

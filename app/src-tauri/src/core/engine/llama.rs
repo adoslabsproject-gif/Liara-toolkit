@@ -31,7 +31,13 @@ const EMBED_CTX: u32 = 2048;
 /// Dimensione del batch di PREFILL. n_batch è QUANTI token si decodificano in un
 /// colpo durante il prefill del prompt: piccolo = la GPU mobile respira tra i
 /// chunk (primo token rapido, niente freeze→crash). NON è n_ctx (la finestra di
-/// contesto resta piena). 512 è lo standard llama.cpp, ottimo compromesso mobile.
+/// contesto resta piena).
+/// Android/Adreno: 256 (non 512) → picco di memoria GPU più basso durante il prefill del prompt lungo
+/// (system + 24 tool + memoria ≈ 3000 token) → riduce i "cede" INTERMITTENTI del backend OpenCL sotto
+/// pressione RAM/GPU (crash agenda che appariva solo a memoria tirata). Desktop resta 512 (Metal/CUDA reggono).
+#[cfg(target_os = "android")]
+const PREFILL_BATCH: u32 = 256;
+#[cfg(not(target_os = "android"))]
 const PREFILL_BATCH: u32 = 512;
 
 /// Contesto EFFETTIVO di uno slot. ⚠️ OGNI guard anti-overflow in generate() deve
@@ -97,7 +103,11 @@ pub struct LlamaEngine {
     // slot 0 = conversation, slot 1 = auxiliary (extraction) — independent prefix caches
     gen: [Mutex<Option<GenState>>; 2],
     emb: Mutex<Option<EmbState>>,
-    im_start: Option<LlamaToken>, // the <|im_start|> token → message-aware overflow trimming
+    // Confini-turno per il trim overflow, PER-DIALETTO: ChatML <|im_start|>/<|im_end|> (Qwen) e Gemma
+    // <start_of_turn>/<end_of_turn>. Senza i marker Gemma, su un modello Gemma lo snap falliva e il
+    // fallback tagliava a 640 → decapitava system+tool (bug catalogo 30-tool, mobile n_ctx 4096).
+    turn_starts: Vec<LlamaToken>,
+    turn_ends: Vec<LlamaToken>,
     // Multimodale (VL): il path del mmproj è noto da load_vl, ma il proiettore (~1.2GB) si carica
     // SOLO alla prima immagine (lazy) — caricarlo all'avvio insieme al modello causa OOM. All'avvio
     // resta in RAM solo il modello (testo). `mtmd` è il proiettore una volta caricato.
@@ -155,8 +165,12 @@ impl LlamaEngine {
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "model".into());
         let threads = std::thread::available_parallelism().map(|n| n.get() as i32).unwrap_or(4);
-        // the <|im_start|> special token, so overflow trimming can snap to message boundaries
-        let im_start = model.str_to_token("<|im_start|>", AddBos::Never).ok().and_then(|v| v.first().copied());
+        // Marker single-token dei confini-turno, per OGNI dialetto che gira su questo engine (Qwen ChatML,
+        // Gemma nativo), così il trim overflow snappa ai confini-messaggio a prescindere dal modello.
+        // Solo i marker che tokenizzano a UN token speciale sono usabili per lo snap.
+        let one_tok = |s: &str| model.str_to_token(s, AddBos::Never).ok().filter(|v| v.len() == 1).map(|v| v[0]);
+        let turn_starts: Vec<LlamaToken> = ["<|im_start|>", "<start_of_turn>"].iter().filter_map(|s| one_tok(s)).collect();
+        let turn_ends: Vec<LlamaToken> = ["<|im_end|>", "<end_of_turn>"].iter().filter_map(|s| one_tok(s)).collect();
         // mmproj: verifichiamo SOLO che esista (fail-fast), ma NON lo carichiamo qui — il proiettore
         // (~1.2GB) si carica alla prima immagine (lazy in describe) per non andare OOM all'avvio.
         if let Some(mm) = mmproj {
@@ -173,7 +187,8 @@ impl LlamaEngine {
             threads,
             gen: [Mutex::new(None), Mutex::new(None)],
             emb: Mutex::new(None),
-            im_start,
+            turn_starts,
+            turn_ends,
             mmproj_path,
             mtmd: Mutex::new(None),
             seed: std::sync::atomic::AtomicU32::new(0x9E3779B9),
@@ -266,23 +281,23 @@ impl Engine for LlamaEngine {
             // #4 FIX: la testa DEVE contenere il system+tool INTERO, non un taglio secco a 640 che lo
             // decapitava (ChatML malformato: system aperto e mai chiuso, e i tool/persona persi). La snappiamo
             // alla fine del PRIMO blocco — il system — includendo il primo <|im_end|>. Cap al budget se enorme.
-            let im_end = self
-                .model
-                .str_to_token("<|im_end|>", AddBos::Never)
-                .ok()
-                .and_then(|v| v.first().copied());
-            let head = im_end
-                .and_then(|ie| tokens.iter().position(|&t| t == ie))
+            // Snap alla fine del PRIMO turno (system+tool) per QUALSIASI dialetto: primo turn-end
+            // presente (ChatML <|im_end|> o Gemma <end_of_turn>). Il fallback 640 resta solo se il
+            // modello non ha nessun marker noto (raro) → non decapita più i tool su Gemma.
+            let head = tokens
+                .iter()
+                .position(|t| self.turn_ends.contains(t))
                 .map(|p| (p + 1).min(budget))
                 .unwrap_or_else(|| (budget / 3).min(640));
             let tail = budget.saturating_sub(head);
             let mut tail_start = tokens.len().saturating_sub(tail);
-            // MESSAGE-AWARE: snap the cut to the next <|im_start|> so we keep WHOLE ChatML turns
-            // and never feed the model half a message.
-            if let Some(im) = self.im_start {
-                if let Some(off) = tokens[tail_start..].iter().position(|&t| t == im) {
-                    tail_start += off;
-                }
+            // MESSAGE-AWARE: snap il taglio al prossimo inizio-turno (ChatML <|im_start|> o Gemma
+            // <start_of_turn>) così si tengono turni INTERI e non si dà mai mezzo messaggio al modello.
+            if let Some(off) = tokens[tail_start..]
+                .iter()
+                .position(|t| self.turn_starts.contains(t))
+            {
+                tail_start += off;
             }
             let mut trimmed = Vec::with_capacity(head + (tokens.len() - tail_start));
             trimmed.extend_from_slice(&tokens[..head]);

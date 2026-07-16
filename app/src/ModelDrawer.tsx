@@ -16,7 +16,7 @@ export function ModelDrawer({ md, cloud, onCloud, onBack }: { md: ModelDownloadA
           <span className="menutag">{cloud ? t("IN USO", "IN USE") : t("☁️ Attiva", "☁️ Enable")}</span>
         </button>
         {md.visibleModels.map((m) => (
-          <button key={m.id} className={`menurow ${!cloud && m.id === md.modelId ? "active" : ""}`} onClick={() => { if (cloud) onCloud(false); md.chooseModel(m); }} disabled={!!md.dl}>
+          <button key={m.id} className={`menurow ${!cloud && m.id === md.modelId ? "active" : ""}`} onClick={() => { if (cloud) onCloud(false); md.chooseModel(m); }} disabled={!!md.dl || (!cloud && m.id === md.modelId)}>
             <span className="menuico">{m.flag} {m.icon}</span>
             <span className="menuname">{m.size}<br /><small style={{ color: "var(--mut)" }}>{m.sub} · {m.gb}</small></span>
             <span className="menutag">{!cloud && m.id === md.modelId ? t("IN USO", "IN USE") : (md.modelsPresent[m.file] ? t("↻ Usa", "↻ Use") : t("⬇ Scarica", "⬇ Download"))}</span>

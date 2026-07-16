@@ -66,6 +66,30 @@ mod tests {
     }
 }
 
+/// Corpo testuale di un documento: i PDF arrivano come base64/dataURL (il frontend non sa leggerne
+/// il testo) → decode + estrazione qui; tutto il resto è già testo. Condiviso da `ingest_document`
+/// (RAG) e `extract_doc_text` (galleria materiali peer).
+fn doc_body(name: &str, text: String) -> anyhow::Result<String> {
+    if crate::core::extract::is_pdf(name) {
+        use base64::Engine as _;
+        let payload = text.rsplit(',').next().unwrap_or(&text);
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(payload.as_bytes())
+            .map_err(|e| anyhow::anyhow!("PDF non valido: {e}"))?;
+        crate::core::extract::pdf_to_text(&bytes)
+            .ok_or_else(|| anyhow::anyhow!("PDF senza testo estraibile (forse scansione)"))
+    } else {
+        Ok(text)
+    }
+}
+
+/// Testo leggibile di un documento allegato (PDF → estrazione, altro → passthrough). Usato dalla
+/// galleria materiali della chat peer: il testo entra nel contesto di `liara_reply` e viaggia E2E.
+#[tauri::command]
+pub fn extract_doc_text(name: String, data: String) -> Result<String, String> {
+    doc_body(&name, data).map_err(|e| e.to_string())
+}
+
 /// Ingest a document into the encrypted vector memory (RAG): chunk → embed → store.
 #[tauri::command]
 pub async fn ingest_document(name: String, text: String, state: State<'_, AppState>) -> Result<usize, String> {
@@ -84,17 +108,7 @@ pub async fn ingest_document(name: String, text: String, state: State<'_, AppSta
             g.as_ref().unwrap().clone()
         };
         // PDFs arrive as base64 (the frontend can't read their text) → decode + extract here
-        let body = if crate::core::extract::is_pdf(&name) {
-            use base64::Engine as _;
-            let payload = text.rsplit(',').next().unwrap_or(&text);
-            let bytes = base64::engine::general_purpose::STANDARD
-                .decode(payload.as_bytes())
-                .map_err(|e| anyhow::anyhow!("PDF non valido: {e}"))?;
-            crate::core::extract::pdf_to_text(&bytes)
-                .ok_or_else(|| anyhow::anyhow!("PDF senza testo estraibile (forse scansione)"))?
-        } else {
-            text
-        };
+        let body = doc_body(&name, text)?;
         let chunks = chunk_text(&body, 600, 80);
         let mut n = 0;
         for ch in chunks {

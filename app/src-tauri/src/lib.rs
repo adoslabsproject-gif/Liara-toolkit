@@ -33,6 +33,10 @@ pub(crate) struct AppState {
     pub(crate) stt: Arc<Mutex<Option<crate::core::audio::Stt>>>,
     pub(crate) rec: Arc<crate::core::audio::RecState>,
     pub(crate) consent: Arc<ConsentGate>,
+    /// Identità crittografica per la chat peer (X25519, caricata all'avvio) + master key at-rest
+    /// (per cifrare la rubrica dei QR accettati). Vedi core/peer.
+    pub(crate) peer: Arc<crate::core::peer::Identity>,
+    pub(crate) crypto: Arc<Crypto>,
 }
 
 fn pick_model() -> String {
@@ -157,6 +161,17 @@ pub fn run() {
             boot_log(&dir, "4b-tools-ok"); // apri" (signal 9 dopo 4-db-ok) — l'ULTIMO stage scritto = dove muore
             let model_path = pick_model();
             let engine: Arc<Mutex<Option<Arc<dyn Engine>>>> = Arc::new(Mutex::new(None));
+            // Identità peer (X25519) caricata/creata UNA volta qui: seal/open poi lavorano in RAM.
+            // Se fallisce (disco pieno ecc.) usiamo un'identità volatile → la chat peer degrada senza
+            // impedire l'avvio dell'app.
+            let peer = Arc::new(
+                crate::core::peer::Identity::load_or_create(&crypto)
+                    .unwrap_or_else(|e| {
+                        eprintln!("LIARA-PEER: identità non persistibile ({e}) → volatile");
+                        crate::core::peer::Identity::ephemeral()
+                    }),
+            );
+            boot_log(&dir, "4c-peer-ok");
             app.manage(AppState {
                 model_path: model_path.clone(),
                 engine: engine.clone(),
@@ -178,6 +193,8 @@ pub fn run() {
                 stt: Arc::new(Mutex::new(None)),
                 rec: Arc::new(crate::core::audio::RecState::default()),
                 consent: Arc::new(ConsentGate::default()),
+                peer,
+                crypto: crypto.clone(),
             });
             boot_log(&dir, "5-state-ok"); // crash DOPO questo = warmup/GPU; crash a 4b = audio(TtsQueue)/state; a 4a = MCP
             // Warmup del modello in un thread NATIVO (deterministico; la WebView Android throttla i timer
@@ -194,6 +211,14 @@ pub fn run() {
             ) {
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                    // CLOUD: se l'utente usa Liara via API, NON caricare il modello locale al boot — spreco di
+                    // RAM e CALORE (l'inferenza va al 32B, il locale resterebbe caricato e inutile). Prima il
+                    // boot lo caricava sempre → il telefono scaldava anche in cloud. Flag scritto dal frontend
+                    // (set_cloud_active) e riletto qui. Presente = cloud attivo → skip.
+                    if crate::core::paths::models_base().join("cloud_active").exists() {
+                        let _ = handle.emit("status", "cloud");
+                        return;
+                    }
                     let mut guard = engine.lock().unwrap();
                     if guard.is_some() {
                         let _ = handle.emit("status", "ready");
@@ -284,6 +309,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             generate,
             remote_generate,
+            cloud_hello,
             warmup,
             memory_facts,
             add_fact,
@@ -313,12 +339,18 @@ pub fn run() {
             tts_speak,
             tts_stop,
             tts_synth,
+            get_tts_voice,
+            set_tts_voice,
             stt_start,
             stt_stop,
             stt_transcribe,
             listen_hands_free,
             set_gps,
+            get_location,
+            set_manual_location,
+            my_network_id,
             ingest_document,
+            extract_doc_text,
             consent_respond,
             permissions,
             set_permission,
@@ -326,6 +358,7 @@ pub fn run() {
             download_model,
             model_present,
             set_active_model,
+            set_cloud_active,
             active_model,
             cancel_download,
             delete_model,
@@ -335,21 +368,35 @@ pub fn run() {
             fetch_models,
             device_caps,
             set_thinking,
-            summarize_conversation
+            summarize_conversation,
+            peer_identity,
+            peer_seal,
+            peer_open,
+            peer_list,
+            peer_add,
+            peer_remove,
+            pick_contact,
+            scan_qr,
+            liara_reply
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|_app_handle, event| {
-            // FIX crash Metal all'uscita, per QUALSIASI percorso (X, Cmd+Q, menu Quit, AppleEvent Quit):
-            // Tauri/macOS chiamerebbe exit() → cxa_finalize → ggml_metal_device_free → ggml_abort (SIGABRT,
-            // il "crash report"). Su ExitRequested usciamo DURI con _exit: niente destructor C++, il SO
-            // libera RAM+GPU da sé. È la rete UNIVERSALE che copre anche i percorsi non gestiti da
-            // on_window_event (es. Cmd+Q → NSApplication terminate → exit diretto).
+            // FIX crash Metal all'uscita (SOLO desktop): Tauri/macOS chiamerebbe exit() → cxa_finalize →
+            // ggml_metal_device_free → ggml_abort (il "crash report"). Su ExitRequested usciamo DURI con
+            // _exit: niente destructor C++, il SO libera RAM+GPU da sé.
+            // ⚠️ SU ANDROID NO: `ExitRequested` scatta anche quando l'activity va in PAUSA (es. appare un
+            // dialog di permessi di sistema — camera del lettore QR, selettore contatti) → l'app faceva
+            // `_exit(0)` e "crashava" da sola (log: "exited cleanly (0)" con GrantPermissionsActivity sopra).
+            // Su Android il ciclo di vita lo gestisce il sistema: NON usciamo mai a mano.
+            #[cfg(not(target_os = "android"))]
             if let tauri::RunEvent::ExitRequested { .. } = event {
                 extern "C" {
                     fn _exit(code: i32) -> !;
                 }
                 unsafe { _exit(0) }
             }
+            #[cfg(target_os = "android")]
+            let _ = event;
         });
 }

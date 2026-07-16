@@ -102,6 +102,18 @@ impl StreamRouter {
     }
 }
 
+/// Applica il router a un output COMPLETO già generato (non-streaming): riproduce ESATTAMENTE la
+/// prosa che l'utente vede in produzione (thinking-channel Gemma e blocco tool-call nascosti).
+/// Serve all'eval-fluenza offline, così i suoi numeri riflettono ciò che l'utente legge DAVVERO e
+/// non i marker interni. È equivalente allo streaming: `push(tutto)` + `finish()` concatenati (il
+/// router è deterministico sull'accumulato `raw`, quindi un push unico rende come N push).
+pub fn render_full(raw: &str) -> String {
+    let mut r = StreamRouter::new();
+    let mut out = r.push(raw);
+    out.push_str(&r.finish());
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::StreamRouter;

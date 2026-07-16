@@ -23,6 +23,8 @@ import { ThemeDrawer } from "./ThemeDrawer";
 import { PermsDrawer } from "./PermsDrawer";
 import { ChatsDrawer } from "./ChatsDrawer";
 import { MenuDrawer } from "./MenuDrawer";
+import { PeerHub } from "./PeerHub";
+import { connect as peerConnect, subscribe as peerSubscribe, totalUnread, pendingCount } from "./peer";
 import "./App.css";
 
 export default function App() {
@@ -32,7 +34,6 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [initializing, setInitializing] = useState(true); // overlay bloccante finché il modello non è in RAM
   const [status, setStatus] = useState("");
-  const [firstHint, setFirstHint] = useState(() => { try { return !localStorage.getItem("liara-hint"); } catch { return true; } });
   useLang(); // rende l'intera UI reattiva ai cambi di lingua (switch istantaneo)
   const [toolUsed, setToolUsed] = useState("");
   const [editing, setEditing] = useState<string | null>(null);
@@ -57,6 +58,36 @@ export default function App() {
   // Android: quando la TTS della WebView finisce (coda vuota), nascondi il pulsante "Ferma voce". Su desktop
   // ci pensa l'evento backend "tts-idle"; su Android il backend non lo emette (voce nella WebView) → serve questo.
   useEffect(() => { setOnTtsIdle(() => setSpeaking(false)); }, []);
+  // Chat peer: apri la connessione al relay all'avvio → i messaggi arrivano anche col drawer chiuso.
+  // La campanella mostra non-letti + richieste d'amicizia in arrivo (aggiornati via subscribe).
+  const [chatNotif, setChatNotif] = useState(0);
+  useEffect(() => {
+    peerConnect().catch(() => {});
+    const upd = () => setChatNotif(totalUnread() + pendingCount());
+    upd();
+    return peerSubscribe(upd);
+  }, []);
+  // Voce Kokoro scelta (35 = Sara F, 36 = Nicola M): caricata all'avvio, cambiabile dal menu.
+  const [voiceSid, setVoiceSid] = useState(35);
+  useEffect(() => { invoke<number>("get_tts_voice").then(setVoiceSid).catch(() => {}); }, []);
+  const toggleVoice = () => {
+    const next = voiceSid === 36 ? 35 : 36;
+    setVoiceSid(next);
+    invoke("set_tts_voice", { sid: next }).catch(() => {});
+    haptic(20);
+  };
+  // Lunghezza risposte (preset per-dispositivo): il budget max_tokens dipende da DOVE gira il cervello —
+  // cloud 32B generoso (contesto ~40k), desktop medio (~8k), mobile conservativo (piccolo, anti-papiro/OOM).
+  const [respLen, setRespLen] = useState<"breve" | "media" | "lunga" | "massima">(() => {
+    try { return (localStorage.getItem("liara_resp_len") as "breve" | "media" | "lunga" | "massima") || "media"; } catch { return "media"; }
+  });
+  const cycleRespLen = () => {
+    const order = ["breve", "media", "lunga", "massima"] as const;
+    const next = order[(order.indexOf(respLen) + 1) % order.length];
+    setRespLen(next);
+    try { localStorage.setItem("liara_resp_len", next); } catch { /* */ }
+    haptic(20);
+  };
   useEffect(() => {
     invoke<{ android?: boolean }>("device_caps")
       .then((c) => { if (typeof c.android === "boolean") { setIsAndroid(c.android); setAndroid(c.android); } })
@@ -73,7 +104,26 @@ export default function App() {
   // eseguono comunque IN LOCALE (memoria/sensori/file on-device). ⚠️ i dati escono dal dispositivo →
   // si attiva solo dopo consenso esplicito. OFF di default (Liara è on-device). Vedi commands/remote.rs.
   const [cloudMode, setCloudMode] = useState(() => { try { return localStorage.getItem("liara_cloud") === "1"; } catch { return false; } });
-  useEffect(() => { try { localStorage.setItem("liara_cloud", cloudMode ? "1" : "0"); } catch {} }, [cloudMode]);
+  useEffect(() => {
+    try { localStorage.setItem("liara_cloud", cloudMode ? "1" : "0"); } catch {}
+    // Scrive il flag lato backend: in cloud il boot NON carica il modello locale (risparmia RAM e calore).
+    invoke("set_cloud_active", { on: cloudMode }).catch(() => {});
+  }, [cloudMode]);
+  // Auto-grow del composer (stile Claude): la textarea cresce col contenuto fino a un max, poi scrolla.
+  // Su input="" (dopo l'invio) torna a una riga. Vedi .composer-box in App.css.
+  useEffect(() => {
+    const ta = taRef.current;
+    if (!ta) return;
+    ta.style.height = "auto";
+    ta.style.height = Math.min(ta.scrollHeight, 200) + "px";
+  }, [input]);
+  // Consenso SEPARATO e opt-in al salvataggio anonimo delle conversazioni (dataset di miglioramento). OFF di
+  // default (privacy-first, come da promessa "nessuna telemetria"). Se ON, remote_generate manda l'header
+  // x-liara-training:allow → SOLO allora il server salva la conversazione anonimizzata (PII redatta). È
+  // DISTINTO dal consenso cloud (quello = "i dati vanno al server per rispondere"; questo = "…e potete anche
+  // conservarli per migliorare Liara"). Revocabile quando si vuole. Vedi commands/remote.rs.
+  const [trainConsent, setTrainConsent] = useState(() => { try { return localStorage.getItem("liara_train") === "1"; } catch { return false; } });
+  useEffect(() => { try { localStorage.setItem("liara_train", trainConsent ? "1" : "0"); } catch {} }, [trainConsent]);
   // Cloud attivo (scelto all'avvio o già salvato da una sessione precedente) → NON serve il modello locale:
   // smonta la schermata di download e l'overlay di caricamento, così l'app è subito usabile via API. Copre
   // sia l'attivazione dal bottone d'avvio sia il rilancio con cloud già scelto (il backend emette comunque
@@ -81,6 +131,22 @@ export default function App() {
   useEffect(() => {
     if (cloudMode && (md.needDownload || initializing)) { md.setNeedDownload(false); setInitializing(false); }
   }, [cloudMode, md.needDownload, initializing]);
+  // Saluto di stato dal server cloud (GET /v1/hello via backend cloud_hello): mostra un messaggio come
+  // PRIMO turno SOLO se il server lo abilita (__liara_hello) — es. avviso che il 32B è temporaneamente
+  // sostituito (dataset) o è tornato. Parte SOLO in modalità cloud (in locale NON si contatta il server:
+  // promessa on-device) e SOLO su chat vuota (non sovrascrive una conversazione). Ogni errore/timeout →
+  // nessun messaggio (fail-safe). Vedi commands/remote.rs::cloud_hello.
+  const helloFired = useRef(false); // il saluto server va mostrato una volta sola per sessione
+  useEffect(() => {
+    if (!cloudMode || helloFired.current) return; // solo in cloud (mai on-device), una volta
+    helloFired.current = true;
+    invoke<string | null>("cloud_hello").then((content) => {
+      if (!content) return; // __liara_hello !== true o errore/timeout → niente messaggio
+      const sid = crypto.randomUUID();
+      setNodes((nd) => (Object.keys(nd).length ? nd : { [sid]: { id: sid, parentId: ROOT, role: "assistant", content } }));
+      setActiveChild((ac) => (Object.keys(ac).length ? ac : { [ROOT]: sid }));
+    }).catch(() => { /* silenzioso: nessun saluto, nessun disturbo */ });
+  }, [cloudMode]);
   // Consenso cloud: modale IN-APP (window.confirm NON funziona nella WebView di Tauri → ritornava
   // sempre false, il cloud restava OFF). Attivandola i dati escono dal dispositivo. Unico per menu+selettore.
   const [cloudAsk, setCloudAsk] = useState(false);
@@ -101,6 +167,7 @@ export default function App() {
   const camVideoRef = useRef<HTMLVideoElement>(null);
   const camStreamRef = useRef<MediaStream | null>(null);
   const camInputRef = useRef<HTMLInputElement>(null); // Android: <input capture> → fotocamera NATIVA (la WebView software non disegna il <video>)
+  const taRef = useRef<HTMLTextAreaElement>(null); // textarea del composer: auto-grow stile Claude
   const [viewImage, setViewImage] = useState<string | null>(null); // lightbox: immagine allegata aperta a schermo intero
   useEffect(() => () => { camStreamRef.current?.getTracks().forEach((tr) => tr.stop()); }, []); // stop camera su unmount
   // Aggancia lo stream al <video> QUANDO è montato (camOpen true). Il preview nero su WKWebView/macOS
@@ -120,9 +187,11 @@ export default function App() {
   }, [camOpen]);
   const [speaking, setSpeaking] = useState(false);
   const [listening, setListening] = useState(false);
+  const [voiceBusy, setVoiceBusy] = useState(false); // download+estrazione voce in corso → banner + mic bloccato
   const [consentReq, setConsentReq] = useState<{ tool: string; action: string } | null>(null);
   const [showPerms, setShowPerms] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
+  const [showNet, setShowNet] = useState(false); // drawer "Rete" (chat AI↔AI, M1)
   const [perms, setPerms] = useState<[string, string, string][]>([]);
   const [theme, setTheme] = useState(() => localStorage.getItem("liara_theme") || "");
   const [showTheme, setShowTheme] = useState(false);
@@ -217,18 +286,22 @@ export default function App() {
     return () => { vv.removeEventListener("resize", apply); vv.removeEventListener("scroll", apply); };
   }, []);
 
-  // AUDIO on-demand: i modelli voce (TTS/STT, 351MB) NON sono nell'app (APK/DMG leggeri) — si scaricano
-  // da GitHub SOLO al primo uso della voce, poi si estraggono in models/audio. Idempotente (audio_present).
+  // AUDIO on-demand: i modelli voce (Kokoro TTS + whisper-small STT + silero VAD, ~592MB) NON sono
+  // nell'app (APK/DMG leggeri) — si scaricano da GitHub SOLO al primo uso della voce, poi si estraggono
+  // in models/audio. Idempotente (audio_present guarda il lexicon Kokoro). Asset "v3": include lexicon+dict,
+  // OBBLIGATORI per il Kokoro multi-lingua (senza, sherpa ABORTA all'ascolto). La v2 era rotta.
   const AUDIO_ZIP = {
-    url: "https://github.com/adoslabsproject-gif/nothumanallowed/releases/download/liara-app-1.3/liara-audio.zip",
-    sha: "ad035283a4224ee95899dbe415b34e1565ff2c33db183f3988763fb3d61b9770",
-    bytes: 351188393,
+    url: "https://github.com/adoslabsproject-gif/nothumanallowed/releases/download/liara-app-1.3/liara-audio-v3.zip",
+    sha: "c430ac7a52fc55e3a3e4fe026f118e6e7d9f8e51c29b5e3760cae111c5556fd7",
+    bytes: 592149872,
   };
   const ensureAudio = async (): Promise<boolean> => {
     if (await invoke<boolean>("audio_present").catch(() => false)) return true;
+    if (voiceBusy) return false; // già in download → non avviarne un secondo
+    setVoiceBusy(true); // banner permanente + mic bloccato finché non è tutto pronto
     try {
       md.setDl({ done: 0, total: AUDIO_ZIP.bytes, label: t("Voce (una volta sola)", "Voice (one-time)") });
-      await invoke("download_model", { url: AUDIO_ZIP.url, sha256: AUDIO_ZIP.sha, bytes: AUDIO_ZIP.bytes, filename: "liara-audio.zip" });
+      await invoke("download_model", { url: AUDIO_ZIP.url, sha256: AUDIO_ZIP.sha, bytes: AUDIO_ZIP.bytes, filename: "liara-audio-v3.zip" });
       md.setDl({ done: AUDIO_ZIP.bytes, total: AUDIO_ZIP.bytes, label: t("Estraggo la voce…", "Extracting voice…") });
       await invoke("extract_audio");
       md.setDl(null);
@@ -238,6 +311,8 @@ export default function App() {
       setStatus(t("Download voce non riuscito: ", "Voice download failed: ") + String(e));
       setTimeout(() => setStatus(""), 3500);
       return false;
+    } finally {
+      setVoiceBusy(false);
     }
   };
 
@@ -308,15 +383,25 @@ export default function App() {
   // load the conversation list once
   useEffect(() => { refreshConvs(); }, []);
 
-  // device GPS → backend (Android = real GPS; if denied/unavailable, backend falls back to IP)
+  // device GPS → backend (Android = real GPS; if denied/unavailable, backend falls back to IP).
+  // ⚠️ DIFFERITA (non all'avvio): chiedere il permesso posizione al mount faceva apparire il dialog di
+  // sistema (GrantPermissionsActivity) DURANTE l'assestamento della WebView → Liara perdeva il foreground
+  // ("va in background"/ridotta a icona all'avvio). La chiediamo SOLO quando l'app è su e assestata
+  // (!initializing && !settling) e con un piccolo ritardo → il dialog cade fuori dalla finestra fragile.
+  // Denied → resta IP/manuale (nessun disturbo). Una sola volta per sessione.
+  const gpsAskedRef = useRef(false);
   useEffect(() => {
-    if (!navigator.geolocation) return;
-    navigator.geolocation.getCurrentPosition(
-      (pos) => { invoke("set_gps", { latitude: pos.coords.latitude, longitude: pos.coords.longitude }).catch(() => {}); },
-      () => { /* permesso negato → resta IP/manuale */ },
-      { enableHighAccuracy: true, timeout: 10000, maximumAge: 600000 }
-    );
-  }, []);
+    if (gpsAskedRef.current || initializing || settling || !navigator.geolocation) return;
+    gpsAskedRef.current = true;
+    const id = setTimeout(() => {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => { invoke("set_gps", { latitude: pos.coords.latitude, longitude: pos.coords.longitude }).catch(() => {}); },
+        () => { /* permesso negato → resta IP/manuale */ },
+        { enableHighAccuracy: true, timeout: 10000, maximumAge: 600000 }
+      );
+    }, 3500);
+    return () => clearTimeout(id);
+  }, [initializing, settling]);
 
   // autosave the active conversation after each completed turn
   useEffect(() => {
@@ -346,8 +431,18 @@ export default function App() {
       // identico); i tool_call che il 32B restituisce vengono eseguiti in LOCALE dal backend. `image`
       // (data URL) va al 32B (Qwen3-VL) per la visione cloud — il generate locale non la usa (visione
       // locale = describe_image, flusso a parte).
-      if (cloudMode) await invoke("remote_generate", { messages, image: image ?? null });
-      else await invoke("generate", { messages });
+      // `train`: consenso al salvataggio anonimo (opt-in). Letto FRESH da localStorage per non catturare uno
+      // stato stale — se assente/false, il backend NON manda l'header e il server non salva nulla.
+      // budget risposta = preset scelto × dispositivo (il backend fa comunque un clamp di sicurezza)
+      const RESP_TOKENS = {
+        cloud: { breve: 512, media: 2048, lunga: 6144, massima: 16384 },
+        desktop: { breve: 384, media: 1024, lunga: 3072, massima: 8192 },
+        mobile: { breve: 256, media: 768, lunga: 1536, massima: 2048 },
+      } as const;
+      const respMode = cloudMode ? "cloud" : isAndroid ? "mobile" : "desktop";
+      const maxTokens = RESP_TOKENS[respMode][respLen];
+      if (cloudMode) await invoke("remote_generate", { messages, image: image ?? null, train: localStorage.getItem("liara_train") === "1", conversationId: convId.current, maxTokens });
+      else await invoke("generate", { messages, maxTokens });
     } catch (err) {
       setNodes((nd) => (nd[assistantId] ? { ...nd, [assistantId]: { ...nd[assistantId], content: "⚠️ " + String(err) } } : nd));
       setBusy(false);
@@ -374,7 +469,13 @@ export default function App() {
     sendText(input.trim());
   }
   function sendText(text: string) {
-    if ((!text && !image) || busy || initializing || settling) return; // niente invii prima che il modello sia pronto/assestato
+    // niente invii finché il modello non è PRONTO: in LOCALE serve scaricato E caricato (non needDownload,
+    // non initializing); in cloud basta la modalità attiva. + mai durante busy/settling. (Bug: durante la
+    // schermata di DOWNLOAD initializing/settling erano false → la textarea restava attiva → Invio da
+    // tastiera → generate su engine NON caricato → crash. Ora bloccato.)
+    // `settling` (6,5s anti-crash) serve solo al modello LOCALE (stabilizza GPU/WebView); in CLOUD non
+    // c'è nulla da stabilizzare → non bloccare l'invio, altrimenti "premo invia e non succede niente".
+    if ((!text && !image) || busy || initializing || (settling && !cloudMode) || (!cloudMode && md.needDownload)) return;
     stoppedRef.current = false; // nuovo turno: riabilita lo streaming dei token
     haptic(18);
     setInput("");
@@ -387,9 +488,12 @@ export default function App() {
     // (fino a 100s misurati) → il prompt sfondava n_ctx (4096) → llama.cpp fa throw → Rust non può
     // catturare l'eccezione C++ → abort() dell'app ("Rust cannot catch foreign exceptions"). E un
     // contesto marcio degradava anche le RISPOSTE (allucinazioni). Finestra scorrevole: teniamo solo
-    // gli ultimi messaggi entro un budget di caratteri (~1500 token); con system+tool compatti il
-    // contesto resta ben sotto n_ctx, con margine per la risposta. Memoria lunga → "Riassumi e continua".
-    const CTX_CHAR_BUDGET = 6000;
+    // gli ultimi messaggi entro un budget di caratteri. Memoria lunga → "Riassumi e continua".
+    // ⚙️ BUDGET SCALATO per capacità di contesto (2026-07-14): prima era 6000 UNIFORME → anche il cloud
+    // 32B e il desktop (n_ctx 32768) ricevevano solo ~1500 token di storia → "non ricordi il primo
+    // messaggio". Ora: CLOUD (32B, ~40960 ctx) e DESKTOP-locale (32768) ricevono ~tutta la conversazione;
+    // ANDROID-locale resta stretto perché n_ctx=4096 col prompt fisso ~3016 token è al limite (anti-crash).
+    const CTX_CHAR_BUDGET = cloudMode ? 80000 : isAndroid ? 6000 : 60000;
     const windowed: Node[] = [];
     let acc = 0;
     for (let i = path.length - 1; i >= 0; i--) {
@@ -624,6 +728,10 @@ export default function App() {
     setShowPerms(true);
   }
 
+  // Nome breve del modello in uso, per l'header e il menu (cloud o locale).
+  const modelName = cloudMode
+    ? "Cloud 32B"
+    : `${md.activeModel.id.includes("gemma") ? "Gemma" : "Liara"} ${md.activeModel.id.includes("12b") ? "12B" : md.activeModel.id.includes("e4b") ? "E4B" : md.activeModel.id.includes("4b") ? "4B" : "1.7B"}`;
 
   return (
     <div className="app">
@@ -632,8 +740,12 @@ export default function App() {
           <button className="icon" title={t("Conversazioni", "Conversations")} onClick={() => { refreshConvs(); setShowChats(true); }}>☰</button>
           <button className="icon" title={t("Nuova chat", "New chat")} onClick={newChat}>✚</button>
           <span className="dot" /><span className="name">Liara</span><small>Personal AI</small>
+          <button className="modelbadge" title={t("Cambia modello", "Change model")} onClick={() => md.openModelDrawer()}>{modelName}</button>
         </div>
         <div className="topbtns">
+          <button className="icon bell" title={t("Liara Chat", "Liara Chat")} onClick={() => setShowNet(true)}>
+            🔔{chatNotif > 0 && <span className="notifdot">{chatNotif > 9 ? "9+" : chatNotif}</span>}
+          </button>
           <button className="icon" title={t("Menu", "Menu")} onClick={() => setShowMenu(true)}>⚙️</button>
         </div>
       </header>
@@ -646,12 +758,6 @@ export default function App() {
           <div className="firstrun-hint" style={{ borderColor: "#4ade80" }}>
             <span>🆕 {t("È disponibile una versione migliorata del modello (più precisa sugli strumenti). Scaricala per aggiornare.", "An improved version of the model is available (better at tools). Download it to update.")}</span>
             <button title={t("Aggiorna", "Update")} onClick={() => { md.setOutdated(false); md.startDownload(md.activeModel, true); }}>{t("Aggiorna", "Update")}</button>
-          </div>
-        )}
-        {firstHint && (
-          <div className="firstrun-hint">
-            <span>💡 {t("Le ", "The ")}<b>{t("prime", "first")}</b>{t(" risposte sono più lente: la GPU si sta preparando (compila i kernel una volta sola). Dopo i primi messaggi ", " replies are slower: the GPU is warming up (it compiles the kernels once). After the first few messages it ")}<b>{t("accelera", "speeds up")}</b>{t(". Anche lo Stop può tardare nei primissimi.", ". Even Stop may lag on the very first ones.")}</span>
-            <button title={t("Ho capito", "Got it")} onClick={() => { setFirstHint(false); try { localStorage.setItem("liara-hint", "1"); } catch { /* */ } }}>×</button>
           </div>
         )}
         {path.length === 0 && (
@@ -747,29 +853,47 @@ export default function App() {
           <span className="rec-dot" /> {t("Sto ascoltando…", "Listening…")} <b>{t("rilascia per trascrivere", "release to transcribe")}</b>
         </div>
       )}
+      {/* #7: durante il download dei driver voce (351 MB, una volta sola) mostra un banner PERMANENTE con
+          progressbar; il mic resta bloccato (disabled) finché non è tutto scaricato ed estratto. */}
+      {voiceBusy && (
+        <div className="voice-dl">
+          <div className="voice-dl-head">🎙️ <b>{md.dl?.label || t("Scarico la voce…", "Downloading voice…")}</b>
+            <span className="voice-dl-pct">{md.dl?.total ? Math.round((md.dl.done / md.dl.total) * 100) : 0}%</span>
+          </div>
+          <div className="dl-bar"><div className="dl-fill" style={{ width: `${md.dl?.total ? Math.min(100, Math.round((md.dl.done / md.dl.total) * 100)) : 0}%` }} /></div>
+          <div className="load-hint">{((md.dl?.done ?? 0) / 1e9).toFixed(2)} / {((md.dl?.total ?? AUDIO_ZIP.bytes) / 1e9).toFixed(2)} GB · {t("il microfono si sblocca quando è pronto", "the mic unlocks when ready")}</div>
+        </div>
+      )}
       <div className="composer">
+        <div className={`composer-box ${busy ? "busy" : ""}`}>
         <textarea
+          ref={taRef}
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
-          placeholder={busy ? t("Liara sta rispondendo… premi ■ per fermarla", "Liara is replying… press ■ to stop her") : t("Scrivi un messaggio…  (Invio per inviare)", "Type a message…  (Enter to send)")}
+          placeholder={busy ? t("Liara sta rispondendo…", "Liara is replying…") : t("Scrivi un messaggio…", "Type a message…")}
           rows={1}
-          disabled={busy || initializing || settling}
+          disabled={busy || initializing || (settling && !cloudMode) || (!cloudMode && md.needDownload)}
         />
+        <div className="composer-actions"><div className="composer-tools">
         <input ref={fileRef} type="file" accept="image/*,.pdf,.txt,.md,.csv,.json,.log,.rs,.py,.js,.ts" style={{ display: "none" }} onChange={handleFile} />
         {/* Android: fotocamera NATIVA (capture) → apre l'app camera del telefono e restituisce la foto come
             file (poi handleFile la tratta come un'immagine allegata). Evita il <video> getUserMedia che sulla
             WebView software (hardwareAccelerated=false) resta NERO. Su desktop invece si usa il preview live. */}
         <input ref={camInputRef} type="file" accept="image/*" capture="environment" style={{ display: "none" }} onChange={handleFile} />
         {!busy && (md.hasVision || cloudMode) && (
-          <button className="send attach" title={t("Allega documento (lo indicizzo per risponderti)", "Attach a document (I'll index it to answer you)")} onClick={() => fileRef.current?.click()}>📎</button>
+          <button className="ctool" title={t("Allega documento (lo indicizzo per risponderti)", "Attach a document (I'll index it to answer you)")} onClick={() => fileRef.current?.click()}>📎</button>
         )}
         {!busy && (md.hasVision || cloudMode) && (
-          <button className="send attach" title={t("Scatta una foto e la analizzo", "Take a photo and I'll analyse it")} onClick={() => isAndroid ? camInputRef.current?.click() : openCamera()}>📷</button>
+          <button className="ctool" title={t("Scatta una foto e la analizzo", "Take a photo and I'll analyse it")} onClick={() => isAndroid ? camInputRef.current?.click() : openCamera()}>📷</button>
         )}
         {!busy && (() => {
           const micStart = async () => {
-            if (!(await ensureAudio())) return; // scarica+estrae la voce al PRIMO uso (poi è locale)
+            if (voiceBusy) return; // voce in download → mic BLOCCATO finché non è pronto
+            // Voce non ancora presente? avvia il download (banner permanente) e NON registrare adesso:
+            // sarebbe assurdo tenere premuto per minuti. A download finito il mic si sblocca e si ritocca.
+            const ready = await invoke<boolean>("audio_present").catch(() => false);
+            if (!ready) { ensureAudio(); return; }
             setListening(true); haptic(30);
             stopSpeak(); setSpeaking(false); // barge-in
             if (isAndroid) {
@@ -800,8 +924,9 @@ export default function App() {
           // su pointerup E su pointercancel/lostpointercapture → il rilascio interrompe SEMPRE.
           return (
             <button
-              className={`send mic${listening ? " rec" : ""}`}
-              title={t("Tieni premuto per dettare, rilascia per trascrivere", "Hold to dictate, release to transcribe")}
+              className={`ctool${listening ? " rec" : ""}`}
+              disabled={voiceBusy}
+              title={voiceBusy ? t("Scarico la voce…", "Downloading voice…") : t("Tieni premuto per dettare, rilascia per trascrivere", "Hold to dictate, release to transcribe")}
               onPointerDown={(e) => {
                 e.preventDefault();
                 try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* ok */ }
@@ -814,11 +939,14 @@ export default function App() {
             >{listening ? "🔴" : "🎤"}</button>
           );
         })()}
+        </div>
         {busy ? (
-          <button className="send stop" title={t("Ferma", "Stop")} onClick={() => { stoppedRef.current = true; if (rafTok.current != null) { cancelAnimationFrame(rafTok.current); rafTok.current = null; } pendingTok.current = ""; invoke("stop_generation").catch(() => {}); setBusy(false); setStatus(""); setToolUsed(""); haptic(35); }}>■</button>
+          <button className="csend stop" title={t("Ferma", "Stop")} onClick={() => { stoppedRef.current = true; if (rafTok.current != null) { cancelAnimationFrame(rafTok.current); rafTok.current = null; } pendingTok.current = ""; invoke("stop_generation").catch(() => {}); setBusy(false); setStatus(""); setToolUsed(""); haptic(35); }}>■</button>
         ) : (
-          <button className="send" onClick={send} disabled={!input.trim()}>➤</button>
+          <button className="csend" onClick={send} disabled={!input.trim()}>➤</button>
         )}
+        </div>
+        </div>
       </div>
 
       {showChats && (
@@ -834,15 +962,28 @@ export default function App() {
             <p className="consent-action">{t(
               "Molto più capace, ma i tuoi messaggi e i dati che l'assistente legge (file, memoria, posizione, foto) vengono inviati al server. NON è più tutto sul dispositivo.",
               "Far more capable, but your messages and the data the assistant reads (files, memory, location, photos) are sent to the server. It's no longer fully on-device.")}</p>
+            {/* Consenso SEPARATO al salvataggio: spento di default. Solo se spuntato parte l'header
+                x-liara-training:allow → il server conserva la conversazione anonimizzata (PII redatta). */}
+            <label className="train-opt">
+              <input type="checkbox" checked={trainConsent} onChange={(e) => { setTrainConsent(e.target.checked); haptic(10); }} />
+              <span>{t(
+                "Aiuta a migliorare Liara: salva le mie conversazioni in forma anonima (dati personali rimossi). Facoltativo, disattivabile quando vuoi.",
+                "Help improve Liara: save my conversations anonymously (personal data removed). Optional, you can turn it off anytime.")}</span>
+            </label>
             <div className="consent-btns">
               <button className="ghost" onClick={() => { setCloudAsk(false); haptic(12); }}>{t("Annulla", "Cancel")}</button>
               <button className="send-sm" onClick={() => {
-                // Cloud ON = ISTANTANEO, NIENTE riavvio. remote_generate non tocca l'engine locale → non c'è
-                // nulla da liberare col riavvio. Il vecchio setSwitchTo chiudeva l'app (exit_app) → l'utente
-                // lo leggeva come un CRASH ("has died", chiusura pulita nel logcat). Ora si entra in cloud
-                // sul posto: l'effect [cloudMode] smonta gli eventuali overlay d'avvio. (Il riavvio resta
-                // solo per lo switch tra modelli LOCALI e per tornare al locale, dove serve ricaricare l'engine.)
-                setCloudMode(true); setCloudAsk(false); haptic(20);
+                setCloudAsk(false);
+                // Se un engine LOCALE è già caricato (non siamo sulla schermata di download né in avvio),
+                // attivare il cloud "sul posto" lo lascia APPESO → la chat si impalla sull'ultima risposta.
+                // Come per il cambio tra modelli LOCALI (chooseModel), va rilasciato con un RIAVVIO pulito:
+                // persistiamo il cloud e mostriamo l'overlay "riavvia per applicare" (bottone esplicito
+                // "Chiudi Liara ora", NON un exit a sorpresa). Al riavvio l'app riparte in cloud, engine
+                // locale scaricato. Se invece NESSUN locale è caricato (cloud scelto all'avvio) → istantaneo.
+                const localLoaded = !cloudMode && !md.needDownload && !initializing;
+                setCloudMode(true); // persiste liara_cloud=1 (come setModelId nel cambio tra locali)
+                if (localLoaded) md.setSwitchTo(t("Liara Cloud (32B)", "Liara Cloud (32B)"));
+                haptic(20);
               }}>{t("☁️ Attiva cloud", "☁️ Enable cloud")}</button>
             </div>
           </div>
@@ -881,6 +1022,7 @@ export default function App() {
           autoSpeak={autoSpeak}
           thinking={thinking}
           cloud={cloudMode}
+          trainConsent={trainConsent}
           onClose={() => setShowMenu(false)}
           onProfile={() => { setShowMenu(false); prof.openProfile(); }}
           onEmail={() => { setShowMenu(false); email.openEmail(); }}
@@ -889,10 +1031,19 @@ export default function App() {
           onTheme={() => { setShowMenu(false); setShowTheme(true); }}
           onModel={() => { setShowMenu(false); md.openModelDrawer(); }}
           onToggleVoice={() => { const v = !autoSpeak; setAutoSpeak(v); autoSpeakRef.current = v; if (!v) stopSpeak(); else haptic(20); }}
+          voiceSid={voiceSid}
+          onVoice={toggleVoice}
+          respLen={respLen}
+          onRespLen={cycleRespLen}
           onToggleThinking={() => { setThinking((v) => !v); haptic(20); }}
           onToggleCloud={() => toggleCloud(!cloudMode)}
+          onToggleTrain={() => { setTrainConsent((v) => !v); haptic(20); }}
+          onNet={() => { setShowMenu(false); setShowNet(true); }}
+          chatNotif={chatNotif}
         />
       )}
+
+      {showNet && <PeerHub onClose={() => setShowNet(false)} />}
 
       {showTheme && (
         <ThemeDrawer theme={theme} setTheme={setTheme} onBack={() => { setShowTheme(false); setShowMenu(true); }} onClose={() => setShowTheme(false)} />

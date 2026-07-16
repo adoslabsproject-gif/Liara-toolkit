@@ -42,7 +42,7 @@ fn get_json(url: &str) -> Result<Value> {
 }
 
 /// Resolve a place name to (lat, lon, label) via Open-Meteo geocoding.
-fn geocode(city: &str) -> Result<(f64, f64, String)> {
+pub(crate) fn geocode(city: &str) -> Result<(f64, f64, String)> {
     let url = format!(
         "https://geocoding-api.open-meteo.com/v1/search?name={}&count=1&language=it&format=json",
         urlencode(city)

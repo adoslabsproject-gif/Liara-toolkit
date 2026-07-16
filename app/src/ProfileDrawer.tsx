@@ -1,5 +1,7 @@
 // Drawer "Su di me": campi del profilo strutturato + i fatti appresi (modifica/aggiungi/dimentica).
 // Riceve l'API di useProfile e `onBack` (torna al menu). JSX estratto verbatim da App.tsx.
+import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { t } from "./i18n";
 import { PROFILE_GROUPS } from "./constants";
 import type { ProfileApi } from "./useProfile";
@@ -9,6 +11,29 @@ export function ProfileDrawer({ profile: p, onBack }: { profile: ProfileApi; onB
     setShowProfile, profile, setProfile, editFact, setEditFact, facts, newFact, setNewFact,
     saveField, addManualFact, forgetFacts, deleteFact, saveEditFact,
   } = p;
+  // #3 Posizione: mostra quella corrente (GPS o manuale), permette l'override manuale e il "Sincronizza"
+  // che ri-chiede il GPS (mostra il prompt permesso se manca). Stato locale, self-contained.
+  const [loc, setLoc] = useState<{ label: string; source: string } | null>(null);
+  const [cityInput, setCityInput] = useState("");
+  const [locBusy, setLocBusy] = useState(false);
+  const refreshLoc = () => invoke<[string, string] | null>("get_location")
+    .then((r) => setLoc(r ? { label: r[0], source: r[1] } : null)).catch(() => {});
+  useEffect(() => { refreshLoc(); }, []);
+  const syncGps = () => {
+    if (!navigator.geolocation) return;
+    setLocBusy(true);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => { invoke("set_gps", { latitude: pos.coords.latitude, longitude: pos.coords.longitude }).then(refreshLoc).finally(() => setLocBusy(false)); },
+      () => { setLocBusy(false); }, // negato/non disponibile → resta com'era
+      { enableHighAccuracy: true, timeout: 10000 }
+    );
+  };
+  const saveManual = () => {
+    const c = cityInput.trim();
+    if (!c) return;
+    setLocBusy(true);
+    invoke("set_manual_location", { city: c }).then(() => { setCityInput(""); refreshLoc(); }).catch(() => {}).finally(() => setLocBusy(false));
+  };
   return (
     <div className="drawer-overlay" onClick={() => setShowProfile(false)}>
       <div className="drawer" onClick={(e) => e.stopPropagation()}>
@@ -18,6 +43,24 @@ export function ProfileDrawer({ profile: p, onBack }: { profile: ProfileApi; onB
           <button className="ghost" onClick={() => setShowProfile(false)}>✕</button>
         </div>
         <p className="hint">{t("Tutto è ", "Everything is ")}<b>{t("facoltativo", "optional")}</b>{t(". Più Liara ti conosce, meglio ti aiuta. Resta solo sul tuo dispositivo.", ". The more Liara knows you, the better she helps. It stays only on your device.")}</p>
+
+        <div className="pgroup">
+          <h3>📍 {t("Posizione", "Location")}</h3>
+          <p className="hint">
+            {loc
+              ? <>{loc.source === "gps" ? "🛰️ " : "✍️ "}<b>{loc.label}</b> · {loc.source === "gps" ? t("automatica (GPS)", "automatic (GPS)") : t("manuale", "manual")}</>
+              : t("Non impostata — sincronizza col GPS o scrivi la tua città.", "Not set — sync with GPS or type your city.")}
+          </p>
+          <div className="addfact">
+            <input placeholder={t("Scrivi la tua città…", "Type your city…")} value={cityInput}
+              onChange={(e) => setCityInput(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") saveManual(); }} disabled={locBusy} />
+            <button className="send-sm" onClick={saveManual} disabled={locBusy || !cityInput.trim()}>✓</button>
+          </div>
+          <button className="ghost" onClick={syncGps} disabled={locBusy}>
+            {locBusy ? t("Attendo il GPS…", "Waiting for GPS…") : t("🔄 Sincronizza col GPS", "🔄 Sync with GPS")}
+          </button>
+        </div>
 
         {PROFILE_GROUPS.map((g) => (
           <div className="pgroup" key={g.title}>

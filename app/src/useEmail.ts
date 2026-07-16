@@ -18,6 +18,7 @@ export function useEmail() {
   const [emails, setEmails] = useState<Mail[]>([]);
   const [openMail, setOpenMail] = useState<OpenMail | null>(null);
   const [mailStatus, setMailStatus] = useState("");
+  const [mailLoading, setMailLoading] = useState(false); // true durante lo scarico IMAP → spinner nel drawer
   const [provider, setProvider] = useState("");
   const [unread, setUnread] = useState(0);
   const [folder, setFolder] = useState("INBOX");
@@ -85,6 +86,7 @@ export function useEmail() {
   async function fetchEmails() {
     setMailStatus(t("Salvo la configurazione e scarico…", "Saving the configuration and downloading…"));
     setMailHelp(false);
+    setMailLoading(true); // avvia lo spinner: lo scarico IMAP dura secondi, altrimenti sembra fermo
     try {
       await invoke("email_set_config", { config: emailCfg }); // usa sempre i valori del form
       const n = await invoke<number>("email_fetch");
@@ -98,6 +100,8 @@ export function useEmail() {
       } else {
         setMailStatus(t("Errore: ", "Error: ") + msg);
       }
+    } finally {
+      setMailLoading(false); // ferma lo spinner sia in successo che in errore
     }
   }
   async function readMail(id: number) {
@@ -154,7 +158,7 @@ export function useEmail() {
 
   return {
     showEmail, setShowEmail, showCfg, setShowCfg, emailCfg, emails, openMail, setOpenMail,
-    mailStatus, provider, unread, folder, showPw, setShowPw, mailHelp, compose, setCompose, sendStatus, cfgMsg,
+    mailStatus, mailLoading, provider, unread, folder, showPw, setShowPw, mailHelp, compose, setCompose, sendStatus, cfgMsg,
     setCfg, openEmail, pickProvider, refreshEmails, switchFolder, restoreMail, purgeMail, emptyTrash,
     saveCfg, fetchEmails, readMail, delMail, startCompose, startReply, sendCompose,
   };

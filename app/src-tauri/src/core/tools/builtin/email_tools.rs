@@ -146,7 +146,55 @@ pronta da rivedere e inviare. Usa questo quando l'utente chiede di scrivere un'e
         let body = args.get("body").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let to_disp = to.clone();
         *self.pending.lock().unwrap() = Some((to, subject, body));
-        Ok(format!("Bozza pronta nel modulo email (a: {to_disp}). Di' all'utente di rivederla e premere Invia."))
+        Ok(format!("Bozza pronta (a: {to_disp}). Riepilogala all'utente e chiedi se INVIARLA: se conferma ('invia'), chiama email_send."))
+    }
+}
+
+/// Invia DAVVERO l'email (SMTP). Usa la bozza preparata con email_draft, o gli argomenti dati.
+/// Sensibile → consenso. Ritorna l'esito REALE: se l'invio fallisce, il modello DEVE dirlo (anti-fabbricazione).
+pub struct EmailSend {
+    pub store: Arc<EmailStore>,
+    pub pending: PendingCompose,
+}
+impl Tool for EmailSend {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "email_send".into(),
+            description: "INVIA l'email. Usalo SOLO quando l'utente conferma l'invio (es. 'invia', 'mandala', \
+'spediscila') di una bozza già preparata con email_draft; se i campi non sono negli argomenti, usa quelli della bozza. \
+Ritorna l'esito REALE: NON dire mai 'inviata' senza aver chiamato questo strumento e ottenuto conferma."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "to": { "type": "string", "description": "Destinatario (opzionale se c'è una bozza pronta)" },
+                    "subject": { "type": "string", "description": "Oggetto (opzionale)" },
+                    "body": { "type": "string", "description": "Testo (opzionale se c'è una bozza pronta)" }
+                },
+                "required": []
+            }),
+        }
+    }
+    fn sensitive(&self) -> bool { true }
+    fn consent_action(&self, args: &Value) -> String {
+        let draft = self.pending.lock().unwrap().clone();
+        let to = args.get("to").and_then(|v| v.as_str()).map(|s| s.to_string())
+            .or_else(|| draft.as_ref().map(|(t, _, _)| t.clone()))
+            .unwrap_or_default();
+        format!("inviare l'email a {}", if to.is_empty() { "?" } else { &to })
+    }
+    fn execute(&self, args: &Value) -> Result<String> {
+        let draft = self.pending.lock().unwrap().clone();
+        let arg = |k: &str| args.get(k).and_then(|v| v.as_str()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        let to = arg("to").or_else(|| draft.as_ref().map(|(t, _, _)| t.clone())).unwrap_or_default();
+        let subject = arg("subject").or_else(|| draft.as_ref().map(|(_, s, _)| s.clone())).unwrap_or_default();
+        let body = arg("body").or_else(|| draft.as_ref().map(|(_, _, b)| b.clone())).unwrap_or_default();
+        if to.is_empty() || body.is_empty() {
+            return Err(anyhow!("Nessuna email da inviare: prepara prima la bozza con email_draft."));
+        }
+        crate::core::email::send_email(&self.store, &to, &subject, &body)?; // invio REALE, errore REALE
+        *self.pending.lock().unwrap() = None; // bozza consumata
+        Ok(format!("Email inviata a {to} (oggetto: \"{subject}\")."))
     }
 }
 

@@ -6,14 +6,18 @@ mod email_tools;
 mod files;
 mod files_write;
 mod notes;
-mod weather;
+mod peer;
+mod phone;
+pub(crate) mod weather; // geocode riusato da set_manual_location
 mod web;
 
 pub use basic::{Calculator, DateTime};
 pub use calendar_tools::{CalendarAdd, CalendarDelete, CalendarList, CalendarSearch};
-pub use email_tools::{EmailDraft, EmailRecent, EmailReply, EmailSearch, EmailSent};
+pub use email_tools::{EmailDraft, EmailRecent, EmailReply, EmailSearch, EmailSend, EmailSent};
 pub use files::{FsList, FsRead, FsSearch};
 pub use files_write::{FsDelete, FsMove, FsWrite};
 pub use notes::{NoteAdd, NoteList, NoteSearch};
+pub use peer::{PeerAsk, PeerConnect, PeerProposeSlot};
+pub use phone::{PhoneCall, SmsSend};
 pub use weather::{SetLocation, Weather};
 pub use web::{WebFetch, WebSearch};

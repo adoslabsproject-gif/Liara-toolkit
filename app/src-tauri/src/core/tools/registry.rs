@@ -1,8 +1,9 @@
 //! Holds the available tools, renders the Qwen tool prompt, and dispatches calls.
 use super::builtin::{
     Calculator, CalendarAdd, CalendarDelete, CalendarList, CalendarSearch, DateTime, EmailDraft,
-    EmailRecent, EmailReply, EmailSearch, EmailSent, FsDelete, FsList, FsMove, FsRead, FsSearch,
-    FsWrite, NoteAdd, NoteList, NoteSearch, SetLocation, Weather, WebFetch, WebSearch,
+    EmailRecent, EmailReply, EmailSearch, EmailSend, EmailSent, FsDelete, FsList, FsMove, FsRead, FsSearch,
+    FsWrite, NoteAdd, NoteList, NoteSearch, PeerAsk, PeerConnect, PeerProposeSlot, PhoneCall,
+    SetLocation, SmsSend, Weather, WebFetch, WebSearch,
 };
 use super::{PendingCompose, Tool};
 use crate::core::calendar::Calendar;
@@ -58,6 +59,10 @@ fn tool_category(name: &str) -> &'static str {
         "web"
     } else if name == "weather" || name == "set_location" {
         "weather"
+    } else if name.starts_with("peer_") {
+        "peer"
+    } else if name == "phone_call" || name == "sms_send" {
+        "phone"
     } else {
         "core" // datetime, calculator
     }
@@ -91,6 +96,16 @@ fn selected_categories(request: &str) -> Vec<&'static str> {
     }
     if has(&["appunt", "annota", "segnati", "prendi nota", "nota che", "i miei appunt"]) {
         cats.push("notes");
+    }
+    // peer (chat AI↔AI): quando l'utente vuole collegare/presentare/coordinare col Liara di un altro.
+    if has(&["il liara di", "collega", "presenta", "conosci il", "coordina con", "combina con",
+             "l'altro liara", "senti il liara", "peer", "invita "]) {
+        cats.push("peer");
+    }
+    // phone: quando l'utente vuole chiamare qualcuno o mandare un SMS (hand-off all'app di sistema).
+    if has(&["chiama", "telefona", "chiamare", "telefonare", "fai una chiamata", "componi il numero",
+             "sms", "messaggino", "manda un messaggio", "scrivi un sms", "manda un sms", "texta"]) {
+        cats.push("phone");
     }
     // web: GENEROSO (meglio un tool in più che il modello che INVENTA per mancanza dello strumento).
     // Oltre alle forme di "cerca", copre le RICERCHE LOCALI/FATTUALI comuni ("trovami un meccanico
@@ -209,8 +224,9 @@ impl ToolRegistry {
                 Box::new(EmailRecent { store: email.clone() }),
                 Box::new(EmailSent { store: email.clone() }),
                 Box::new(EmailSearch { store: email.clone() }),
-                Box::new(EmailReply { store: email, pending: pending.clone() }),
-                Box::new(EmailDraft { pending }),
+                Box::new(EmailReply { store: email.clone(), pending: pending.clone() }),
+                Box::new(EmailDraft { pending: pending.clone() }),
+                Box::new(EmailSend { store: email, pending }),
                 Box::new(CalendarAdd { cal: cal.clone() }),
                 Box::new(CalendarList { cal: cal.clone() }),
                 Box::new(CalendarSearch { cal: cal.clone() }),
@@ -224,6 +240,13 @@ impl ToolRegistry {
                 Box::new(NoteAdd { mem: mem.clone() }),
                 Box::new(NoteList { mem: mem.clone() }),
                 Box::new(NoteSearch { mem }),
+                // Canale peer (chat AI↔AI) — SPEC congelata per il dataset; execute stub finché E2E+AI (M2/M3).
+                Box::new(PeerConnect),
+                Box::new(PeerAsk),
+                Box::new(PeerProposeSlot),
+                // Telefono: hand-off all'app di sistema (chiamata/SMS), nessun permesso pericoloso.
+                Box::new(PhoneCall),
+                Box::new(SmsSend),
             ],
         }
     }

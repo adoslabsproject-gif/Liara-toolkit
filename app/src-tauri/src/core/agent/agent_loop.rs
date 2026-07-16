@@ -52,12 +52,14 @@ fn assistant_toolcall(name: &str, args: &serde_json::Value, gemma: bool) -> Stri
 
 /// ReAct loop: the model thinks, optionally calls tools (Qwen native format),
 /// observes results, and answers. Streams the answer; surfaces tool steps.
+#[allow(clippy::too_many_arguments)]
 pub fn run_agent(
     engine: &dyn Engine,
     registry: &ToolRegistry,
     base_system: &str,
     messages: &[Message],
     thinking: bool,
+    max_tokens: usize, // budget risposta (regolabile dall'utente: Breve/Media/Lunga/Massima per dispositivo)
     cancel: &std::sync::atomic::AtomicBool,
     sink: &mut dyn AgentSink,
 ) -> anyhow::Result<String> {
@@ -105,12 +107,14 @@ pub fn run_agent(
     // SOLO Qwen: Gemma emette il SUO formato nativo (`<|tool_call>call:…`), su cui la grammar Qwen
     // (ancorata a `<tool_call>` senza pipe) non scatterebbe comunque — la teniamo spenta per non
     // rischiare interferenze e lasciare Gemma libero di produrre il dialetto che il parser capisce.
-    // ⚠️ GBNF DISATTIVATA per default (2026-07-13): il `sampler.sample()` con la grammatica lanciava
-    // un'eccezione C++ durante la generazione di un tool-call (crash "foreign exception" chiedendo gli
-    // appuntamenti, IDENTICO su macOS e Windows → NON è il backend, è la grammatica CPU-side). Il modello
-    // LoRA produce comunque il formato `<tool_call>{…}` da addestramento e il parser lo estrae. Riattivabile
-    // con LIARA_GBNF=1 per testare/confrontare.
-    let grammar = (!registry.is_empty() && !gemma && std::env::var("LIARA_GBNF").is_ok())
+    // ✅ GBNF RIATTIVATA per default (2026-07-14): il crash "foreign exception" era il `throw` su dead-end
+    // in llama-grammar.cpp ("Unexpected empty grammar stack") che attraversava l'FFI → SIGABRT. Ora quel
+    // throw è reso NON-FATALE nel vendored (su dead-end la grammatica smette di vincolare → sampling libero,
+    // il parser recupera il JSON): niente più crash. Con la grammatica ON il tool-call è deterministicamente
+    // ben formato. Kill-switch runtime SENZA rebuild: `LIARA_GBNF=0` la disattiva. (SOLO Qwen: Gemma usa il
+    // suo dialetto nativo, su cui la grammar ancorata a `<tool_call>` non scatterebbe → la lasciamo libera.)
+    let gbnf_on = std::env::var("LIARA_GBNF").map(|v| v != "0").unwrap_or(true);
+    let grammar = (!registry.is_empty() && !gemma && gbnf_on)
         .then(|| registry.tool_call_grammar());
 
     for _ in 0..5 {
@@ -148,8 +152,9 @@ pub fn run_agent(
                 // risposta. Il papiro-loop è già contenuto dalla repeat/frequency penalty (llama.rs
                 // build_sampler, finestra 256 + freq/presence 0.4). Un cap SEPARATO sul <think> (stop a
                 // </think> + reset del budget) sarebbe l'ideale ma richiede due fasi nello streaming;
-                // la coppia penalty+budget rende il papiro raro.
-                max_tokens: 1024,
+                // la coppia penalty+budget rende il papiro raro. Il budget è ora REGOLABILE dall'utente
+                // (preset Breve/Media/Lunga/Massima, con max per-dispositivo) → passato da generate().
+                max_tokens,
                 temperature: 0.7,
                 stop: if gemma {
                     // Gemma chiude il tool-call nativo con `<tool_call|>`; il turno con `<turn|>`.
@@ -523,7 +528,7 @@ mod integration {
     fn drive(eng: &FakeEngine, user: &str, sink: &mut RecSink) -> String {
         let never = AtomicBool::new(false);
         let msgs = vec![Message { role: "user".into(), content: user.into() }];
-        run_agent(eng, &registry(), "sys", &msgs, false, &never, sink).unwrap()
+        run_agent(eng, &registry(), "sys", &msgs, false, 1024, &never, sink).unwrap()
     }
 
     #[test]

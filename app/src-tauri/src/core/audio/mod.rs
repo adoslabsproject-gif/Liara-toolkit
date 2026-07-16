@@ -1,4 +1,4 @@
-//! Local speech: Piper TTS + whisper STT via sherpa-onnx (offline, no cloud, cross-platform).
+//! Local speech: Kokoro TTS + whisper-small STT via sherpa-onnx (offline, no cloud, cross-platform).
 //! Both engines are heavy to construct, so they are lazy-loaded and reused.
 mod text;
 mod vad;
@@ -6,7 +6,7 @@ pub use text::punctuate_question;
 pub use vad::listen_vad;
 
 use anyhow::{anyhow, Result};
-use sherpa_rs::tts::{VitsTts, VitsTtsConfig};
+use sherpa_rs::tts::{KokoroTts, KokoroTtsConfig};
 use sherpa_rs::whisper::{WhisperConfig, WhisperRecognizer};
 use std::path::PathBuf;
 
@@ -18,6 +18,20 @@ fn audio_dir() -> PathBuf {
 
 fn s(p: PathBuf) -> String {
     p.to_string_lossy().into_owned()
+}
+
+/// Voci italiane di Kokoro (kokoro-multi-lang-v1_0, mappa ufficiale sherpa).
+pub const VOICE_SARA: i32 = 35; // if_sara — femminile
+pub const VOICE_NICOLA: i32 = 36; // im_nicola — maschile
+
+/// sid della voce TTS scelta: file `tts_voice` (impostazioni) → env `LIARA_TTS_SID` → 35 (Sara).
+pub fn configured_sid() -> i32 {
+    if let Ok(txt) = std::fs::read_to_string(crate::core::paths::models_base().join("tts_voice")) {
+        if let Ok(v) = txt.trim().parse::<i32>() {
+            return v;
+        }
+    }
+    std::env::var("LIARA_TTS_SID").ok().and_then(|v| v.parse().ok()).unwrap_or(VOICE_SARA)
 }
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -109,34 +123,42 @@ pub fn stop_recording(state: &RecState) -> (Vec<f32>, u32) {
     (samples, state.rate.load(Ordering::SeqCst))
 }
 
-/// Piper (VITS) Italian text-to-speech.
+/// Kokoro (multilingua) Italian text-to-speech — prosodia/enfasi migliori del vecchio Piper.
 pub struct Tts {
-    inner: VitsTts,
+    inner: KokoroTts,
+    sid: i32,
 }
 impl Tts {
     pub fn load() -> Result<Self> {
-        let d = audio_dir().join("vits-piper-it_IT-paola-medium");
+        let d = audio_dir().join("kokoro-multi-lang-v1_0");
         if !d.exists() {
             return Err(anyhow!("modello TTS non trovato in {}", d.display()));
         }
-        let cfg = VitsTtsConfig {
-            model: s(d.join("it_IT-paola-medium.onnx")),
+        let sid = configured_sid();
+        // Kokoro MULTI-LINGUA (v1.0) RICHIEDE lexicon + dict_dir anche per l'italiano: senza, sherpa
+        // ABORTA ("please pass --kokoro-lexicon and --kokoro-dict-dir") → SIGABRT all'ascolto. Verificato.
+        let cfg = KokoroTtsConfig {
+            model: s(d.join("model.onnx")),
+            voices: s(d.join("voices.bin")),
             tokens: s(d.join("tokens.txt")),
             data_dir: s(d.join("espeak-ng-data")),
+            dict_dir: s(d.join("dict")),
+            lexicon: format!("{},{}", s(d.join("lexicon-us-en.txt")), s(d.join("lexicon-zh.txt"))),
             length_scale: 1.0,
+            lang: "it".into(),
             ..Default::default()
         };
-        Ok(Self { inner: VitsTts::new(cfg) })
+        Ok(Self { inner: KokoroTts::new(cfg), sid })
     }
 
     /// Synthesize speech → (mono f32 samples, sample rate).
     pub fn synth(&mut self, text: &str) -> Result<(Vec<f32>, u32)> {
-        let audio = self.inner.create(text, 0, 1.0).map_err(|e| anyhow!("TTS: {e}"))?;
+        let audio = self.inner.create(text, self.sid, 1.0).map_err(|e| anyhow!("TTS: {e}"))?;
         Ok((audio.samples, audio.sample_rate))
     }
 }
 
-/// Campioni f32 [-1,1] → file WAV PCM 16-bit mono. Su Android la voce paola si sintetizza qui e si
+/// Campioni f32 [-1,1] → file WAV PCM 16-bit mono. Su Android la voce Kokoro si sintetizza qui e si
 /// riproduce nella WebView (l'audio nativo crasha): questo dà alla WebView un blob pronto da suonare.
 pub fn pcm_to_wav(samples: &[f32], rate: u32) -> Vec<u8> {
     let data_len = (samples.len() * 2) as u32;
@@ -161,7 +183,7 @@ pub fn pcm_to_wav(samples: &[f32], rate: u32) -> Vec<u8> {
     w
 }
 
-/// Streaming TTS queue: a single worker thread owns the Piper engine + audio output
+/// Streaming TTS queue: a single worker thread owns the Kokoro engine + audio output
 /// (rodio is !Send) and plays appended sentences IN ORDER. The agent can push sentences
 /// as they're generated → Liara starts speaking before the answer is finished.
 pub struct TtsQueue {
@@ -170,6 +192,7 @@ pub struct TtsQueue {
 enum TtsMsg {
     Speak(String),
     Stop,
+    Reload, // scarta il motore in cache → la prossima frase ricarica con la voce aggiornata
 }
 impl TtsQueue {
     /// `on_idle` fires once whenever the queue drains (used to hide the "stop voice" button).
@@ -206,6 +229,7 @@ impl TtsQueue {
                             }
                         }
                     }
+                    Ok(TtsMsg::Reload) => { tts = None; } // ricarica alla prossima frase (nuova voce)
                     Err(RecvTimeoutError::Timeout) => {
                         if had_audio && sink.empty() { had_audio = false; on_idle(); }
                     }
@@ -221,6 +245,10 @@ impl TtsQueue {
     pub fn stop(&self) {
         let _ = self.tx.send(TtsMsg::Stop);
     }
+    /// Invalida il motore in cache → la prossima frase usa la voce appena scelta.
+    pub fn reload(&self) {
+        let _ = self.tx.send(TtsMsg::Reload);
+    }
 }
 
 /// Whisper speech-to-text (multilingual; we bias to Italian).
@@ -229,14 +257,16 @@ pub struct Stt {
 }
 impl Stt {
     pub fn load() -> Result<Self> {
-        let d = audio_dir().join("sherpa-onnx-whisper-base");
+        let d = audio_dir().join("sherpa-onnx-whisper-small");
         if !d.exists() {
             return Err(anyhow!("modello STT non trovato in {}", d.display()));
         }
+        // whisper-small int8: molto più accurato del base (capiva male, niente punteggiatura),
+        // resta int8 per contenere il peso su mobile.
         let cfg = WhisperConfig {
-            encoder: s(d.join("base-encoder.int8.onnx")),
-            decoder: s(d.join("base-decoder.int8.onnx")),
-            tokens: s(d.join("base-tokens.txt")),
+            encoder: s(d.join("small-encoder.int8.onnx")),
+            decoder: s(d.join("small-decoder.int8.onnx")),
+            tokens: s(d.join("small-tokens.txt")),
             language: "it".into(),
             ..Default::default()
         };

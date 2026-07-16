@@ -79,6 +79,7 @@ pub async fn describe_image(
             &system,
             &messages,
             thinking,
+            1024, // descrizione immagine: budget standard
             &cancel,
             &mut sink,
         )?;
