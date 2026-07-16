@@ -137,6 +137,23 @@ addestra ternario, Gemma e Qwen.
 
 <br>
 
+## 🧰 Strumenti — 30 integrati, chiamate mai rotte
+
+Liara non si limita a rispondere: **agisce**. Un ciclo agentico (ReAct, fino a 5 passi per turno)
+decide quando usare uno dei **30 strumenti integrati** — email, agenda, web, file, note, meteo,
+telefono e il canale **peer AI↔AI** con cui il tuo Liara parla col Liara di un contatto, cifrato
+end-to-end. Ogni chiamata è **JSON valido per costruzione** (grammatica GBNF) e le azioni sensibili
+passano da un **consenso** esplicito che viene ricordato. I server **MCP** aggiungono strumenti a runtime.
+
+<div align="center">
+<img src="media/tools.svg" alt="I 30 strumenti di Liara e il ciclo agentico: ReAct → GBNF → consenso → esecuzione" width="92%" />
+</div>
+
+Catalogo completo, strumento per strumento, in **[`TOOLS.md`](./TOOLS.md)** — è lo stesso catalogo
+esportato dal codice (`dump_tools`) su cui si addestra il modello: *training == runtime*.
+
+<br>
+
 ## 🏗️ Architettura
 
 Un solo **core in Rust** (`app/src-tauri/src/core/`, ~8k righe), molti frontend. UI **React/TS** sottile (Tauri).

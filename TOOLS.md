@@ -1,89 +1,96 @@
-# Liara — Tool Catalog
+# Liara — Catalogo strumenti
 
-> ⚠️ **Status:** this is the TARGET catalog (the plan), **not** what's built. **Implemented today (6):** `datetime`, `calculator`, `email_recent`, `email_sent`, `email_search`, `email_reply`, `email_draft`. Everything else below is **planned**. The tools are a local Rust `Tool` trait — **MCP, GBNF, consent-gates and the ~74 other tools are not yet implemented.** Next batch to prioritize: `web_fetch`, `web_search`, `fs_list/read/search`, `memory_search`.
+**30 strumenti integrati, tutti implementati e attivi** (più gli strumenti **MCP** dinamici).
+Questo file descrive il catalogo REALE: è lo stesso esportato dal codice con `dump_tools`
+(`tools_catalog.json`), che è anche la fonte del dataset di fine-tuning — *training == runtime*,
+il modello si allena esattamente sugli strumenti che troverà in produzione.
 
-Legenda: 🟢 locale/offline · 🌐 richiede rete · 🔑 richiede API key o backend · 🖥️ desktop · 📱 telefono (Android) · ⚠️ richiede permesso utente
+<div align="center">
+<img src="media/tools.svg" alt="I 30 strumenti di Liara e il ciclo agentico" width="92%" />
+</div>
 
-Tutti i tool passano dal **tool host MCP** con **chiamate a grammatica vincolata (GBNF)** → JSON sempre valido. Ogni tool sensibile chiede **consenso** la prima volta (come i permessi del telefono).
+Come funziona una chiamata:
 
-## 🌐 Web & conoscenza
-- **web_fetch** 🌐 — URL → testo pulito/markdown (estrazione readability), via anche per leggere articoli/pagine
-- **web_search** 🌐🔑 — ricerca avanzata (backend SearXNG self-hosted = gratis+privato, o API Brave/Tavily); risultati ordinati
-- **web_screenshot** 🌐 — render pagina → immagine
-- **wikipedia / dizionario / traduci** 🌐
-- **maps_places** 🌐🔑 — geocoding, vicino a me, percorsi
-- **news / quotazioni / meteo** 🌐
-- **youtube_transcript** 🌐 — trascrizione video
+1. **Agente ReAct** (fino a 5 passi per turno): il modello decide se e quale strumento usare.
+2. **Grammatica GBNF**: appena il modello apre un `<tool_call>`, la generazione è vincolata a
+   JSON valido per costruzione — niente chiamate malformate.
+3. **Consenso** (🔒): gli strumenti sensibili si fermano e chiedono il permesso all'utente;
+   la decisione viene ricordata per strumento.
+4. Il risultato torna al modello come `<tool_response>`, che risponde all'utente.
 
-## 📁 File & gestione dispositivo (il "file manager")
-- **fs_list** 🟢 — contenuto di una cartella ("apri Download")
-- **fs_read** 🟢 — leggi file (txt, pdf, docx, csv → testo)
-- **fs_search** 🟢 — trova file per nome/contenuto
-- **fs_write / fs_create** 🟢⚠️
-- **fs_move / fs_rename / fs_copy / fs_delete** 🟢⚠️ (con conferma)
-- **fs_open** 🟢 — apri con app predefinita
-- **fs_organize** 🟢 — riordino intelligente ("ordina la cartella Download per tipo/data")
-- **disk_usage / find_large / find_duplicates** 🟢
-- **zip / unzip** 🟢
+Legenda: 🟢 locale/offline · 🌐 richiede rete · 🔒 consenso richiesto · 🆕 nuovo (0.3.0)
 
-## ✉️ Email & comunicazione
-- **email_read / email_search** 🟢 (già salviamo nel DB)
-- **email_send** 🌐 — invio SMTP (prossimo step)
-- **calendar** 🟢/🌐 — leggi/crea eventi (locale o CalDAV)
-- **contacts** 🟢📱⚠️ — rubrica
-- **notifications_read** 📱⚠️ — legge notifiche in arrivo (incl. WhatsApp/Telegram, via NotificationListener)
-- **sms_read / sms_send** 📱⚠️
-- **call** 📱⚠️ — avvia chiamata
+## ⏰ Core
+| Strumento | | Cosa fa |
+|---|---|---|
+| `datetime` | 🟢 | data e ora correnti, comprensione delle date relative in italiano |
+| `calculator` | 🟢 | calcoli sempre esatti (il modello non fa aritmetica a mano) |
 
-## 📱 Dispositivo & sensori (telefono)
-- **location** 📱⚠️🌐 — GPS / posizione
-- **weather** 🌐🔑 — meteo dalla posizione
-- **battery** 🟢📱 — livello, in carica
-- **connectivity** 🟢📱 — wifi/cellulare/aereo
-- **device_info** 🟢 — modello, OS, RAM, storage libero
-- **accelerometro / giroscopio / orientamento** 📱
-- **sensore_luce / prossimità** 📱
-- **contapassi / attività** 📱⚠️
-- **bussola / magnetometro** 📱
-- **barometro** 📱 — pressione/altitudine
-- **camera** 📱⚠️ — foto, scansione QR/documenti
-- **microfono** 📱⚠️ — registra / trascrivi
-- **clipboard** 🟢 — leggi/scrivi appunti
-- **torcia / vibrazione** 📱
-- **luminosità / volume** 📱⚠️
-- **screenshot / schermo** 🖥️📱
-- **bluetooth / NFC scan** 📱⚠️
+## 🌐 Web
+| Strumento | | Cosa fa |
+|---|---|---|
+| `web_fetch` | 🌐 | URL → testo pulito; guardia anti-SSRF ricontrolla l'host a ogni redirect |
+| `web_search` | 🌐 | ricerca web; il modello ammette quando non trova nulla |
 
-## 🧰 Produttività & utilità
-- **calculator** 🟢 — matematica
-- **convert** 🟢 — unità / valuta (valuta 🌐)
-- **datetime** 🟢 — ora, fusi, "tra quanto…"
-- **reminders / alarms / timers** 🟢📱⚠️
-- **notes / todo** 🟢
-- **code_exec** 🟢⚠️ — Python/JS in sandbox
-- **ocr** 🟢 — immagine → testo
-- **qr_generate / qr_read** 🟢
-- **password_generate** 🟢
+## ⛅ Meteo & posizione
+| Strumento | | Cosa fa |
+|---|---|---|
+| `weather` | 🌐 | meteo sulla posizione corrente o su una località |
+| `set_location` | 🟢 | posizione da GPS o override manuale |
 
-## ⚙️ Sistema & automazione
-- **open_app** 🖥️📱⚠️
-- **settings_toggle** 📱⚠️ — wifi, bluetooth, DND, luminosità
-- **run_shortcut** 📱 — automazioni / scorciatoie
-- **screenshot** 🖥️📱
+## ✉️ Email (IMAP/SMTP su rustls, archivio cifrato)
+| Strumento | | Cosa fa |
+|---|---|---|
+| `email_recent` | 🟢 | ultime email ricevute |
+| `email_sent` | 🟢 | email inviate |
+| `email_search` | 🟢 | ricerca nell'archivio locale |
+| `email_reply` | 🔒 | prepara la risposta a un'email |
+| `email_draft` | 🔒 | prepara una bozza nuova |
+| `email_send` | 🔒 | invia DAVVERO via SMTP e riporta l'esito reale (niente "inviata" a parole) |
 
-## 🧠 Memoria & RAG (interni)
-- **memory_search** 🟢 — ricerca semantica (sqlite-vec)
-- **memory_add / profile_update** 🟢
-- **rag_query** 🟢 — pacchetti di dominio
+## 📅 Agenda (locale, titoli e note cifrati)
+| Strumento | | Cosa fa |
+|---|---|---|
+| `calendar_add` | 🟢 | nuovo appuntamento ("domani alle 15", "venerdì prossimo") |
+| `calendar_list` | 🟢 | appuntamenti in arrivo |
+| `calendar_search` | 🟢 | cerca per testo/periodo |
+| `calendar_delete` | 🔒 | cancella (per spostare: delete + add, mai doppioni) |
 
----
+## 📁 File (confinati a `$HOME`, traversal-guard)
+| Strumento | | Cosa fa |
+|---|---|---|
+| `fs_list` | 🟢 | contenuto di una cartella |
+| `fs_read` | 🟢 | legge un file; i PDF passano dall'estrattore testo |
+| `fs_search` | 🟢 | trova file per nome |
+| `fs_write` | 🔒 | scrive/crea un file |
+| `fs_move` | 🔒 | sposta/rinomina |
+| `fs_delete` | 🔒 | elimina |
 
-## Architettura
-- Tutto via **MCP** → si aggiungono anche tool esterni dell'ecosistema senza riscriverli.
-- **Permessi granulari**: ogni tool sensibile chiede consenso (revocabile in un pannello "Permessi").
-- **Locale prima**: i tool 🟢 funzionano offline; i 🌐 usano la rete solo quando invocati.
+## 📝 Note (cifrate, ricerca semantica)
+| Strumento | | Cosa fa |
+|---|---|---|
+| `note_add` | 🟢 | salva un appunto |
+| `note_list` | 🟢 | elenca gli appunti |
+| `note_search` | 🟢 | ritrova per significato, non solo per parola |
 
-## Ordine di costruzione consigliato
-1. **MCP tool host + loop agente + chiamate GBNF** (fondazione per TUTTI i tool)
-2. **Primo lotto cross-platform**: web_fetch, web_search, file manager (list/read/search/manage), email_send, datetime/calc, memory_search
-3. **Tool dispositivo/sensori** quando siamo su **Android** (location, weather, battery, sensori, notifiche)
+## 🤝 Peer AI↔AI 🆕 (canale cifrato end-to-end X25519)
+| Strumento | | Cosa fa |
+|---|---|---|
+| `peer_connect` | 🔒 | apre il collegamento col Liara di un contatto in rubrica |
+| `peer_ask` | 🔒 | fa una domanda al Liara dell'altro ("chiedi a Marco quando è libero") |
+| `peer_propose_slot` | 🔒 | propone/negozia un orario con l'altro assistente |
+
+I due Liara possono anche **coordinarsi da soli su un obiettivo** (Modalità AI nella chat peer):
+obiettivo + materiali (PDF/foto) → conversano E2E a nome dei rispettivi utenti.
+
+## 📞 Telefono 🆕 (Android — hand-off, zero permessi pericolosi)
+| Strumento | | Cosa fa |
+|---|---|---|
+| `phone_call` | 🔒 | prepara la chiamata nell'app telefono (Intent `ACTION_DIAL`) |
+| `sms_send` | 🔒 | prepara l'SMS nell'app messaggi (Intent `ACTION_SENDTO`) |
+
+## 🧩 MCP — strumenti dinamici
+I server **MCP** configurati (stdio) vengono avviati dall'app: i loro strumenti si aggiungono al
+catalogo a runtime, **tutti dietro consenso**. Solo gli strumenti pertinenti alla richiesta vengono
+resi nel prompt (email/agenda sempre attivi; file/note attivati per parola chiave) — il prompt
+resta corto e il mobile ringrazia.
