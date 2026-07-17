@@ -37,6 +37,8 @@ pub(crate) struct AppState {
     /// (per cifrare la rubrica dei QR accettati). Vedi core/peer.
     pub(crate) peer: Arc<crate::core::peer::Identity>,
     pub(crate) crypto: Arc<Crypto>,
+    /// Riepiloghi incrementali della chat AI↔AI, per contatto (gestione contesto di liara_reply).
+    pub(crate) peer_summaries: Arc<crate::commands::peer_ai::PeerSummaries>,
 }
 
 fn pick_model() -> String {
@@ -195,6 +197,7 @@ pub fn run() {
                 consent: Arc::new(ConsentGate::default()),
                 peer,
                 crypto: crypto.clone(),
+                peer_summaries: Arc::new(Default::default()),
             });
             boot_log(&dir, "5-state-ok"); // crash DOPO questo = warmup/GPU; crash a 4b = audio(TtsQueue)/state; a 4a = MCP
             // Warmup del modello in un thread NATIVO (deterministico; la WebView Android throttla i timer

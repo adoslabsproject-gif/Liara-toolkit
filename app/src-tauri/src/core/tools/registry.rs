@@ -78,9 +78,91 @@ fn tool_category(name: &str) -> &'static str {
 /// il training usa quello FULL, il runtime quello compatto). Decisione al revisore: o il
 /// generatore emette compatto+selezionato, o si toglie la selezione a runtime (tutti-24
 /// compatti ovunque, prefill ~1.5k < soglia crash ~3k). Finché non deciso: mismatch reale.
+/// Minuscole + accenti piatti (à→a…): i refusi più comuni includono l'accento dimenticato.
+fn norm(s: &str) -> String {
+    s.to_lowercase()
+        .chars()
+        .map(|c| match c {
+            'à' | 'á' | 'â' => 'a',
+            'è' | 'é' | 'ê' => 'e',
+            'ì' | 'í' | 'î' => 'i',
+            'ò' | 'ó' | 'ô' => 'o',
+            'ù' | 'ú' | 'û' => 'u',
+            _ => c,
+        })
+        .collect()
+}
+
+/// Distanza OSA (Damerau-Levenshtein con trasposizioni adiacenti) ≤ max. Copre i refusi reali:
+/// lettera sbagliata ("tempi"→"tempo"), mancante/di troppo, due adiacenti invertite ("agneda").
+fn osa_leq(a: &[char], b: &[char], max: usize) -> bool {
+    if a.len().abs_diff(b.len()) > max {
+        return false;
+    }
+    let (n, m) = (a.len(), b.len());
+    let mut d = vec![vec![0usize; m + 1]; n + 1];
+    for (i, row) in d.iter_mut().enumerate() {
+        row[0] = i;
+    }
+    for j in 0..=m {
+        d[0][j] = j;
+    }
+    for i in 1..=n {
+        for j in 1..=m {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            d[i][j] = (d[i - 1][j] + 1).min(d[i][j - 1] + 1).min(d[i - 1][j - 1] + cost);
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                d[i][j] = d[i][j].min(d[i - 2][j - 2] + 1);
+            }
+        }
+    }
+    d[n][m] <= max
+}
+
+/// La parola della richiesta `w` "vale" la parola-chiave `k`? Esatto/substring come prima; in più,
+/// per keyword ≥5 lettere, tollera UN refuso — anche sul prefisso (le keyword tronche tipo
+/// "appuntament" devono agganciare "appuntamneto").
+fn word_matches(k: &str, w: &str) -> bool {
+    if w.contains(k) {
+        return true;
+    }
+    let kc: Vec<char> = k.chars().collect();
+    if kc.len() < 5 {
+        return false; // parole corte: solo esatto (fuzzy su "sms"/"mail" = falsi positivi a pioggia)
+    }
+    let wc: Vec<char> = w.chars().collect();
+    if osa_leq(&kc, &wc, 1) {
+        return true;
+    }
+    // keyword-prefisso ("appuntament") dentro una parola più lunga col refuso: confronta i prefissi
+    // di pari lunghezza E +1 (l'inversione può cadere a cavallo del troncamento, l'inserzione allunga)
+    [kc.len(), kc.len() + 1]
+        .into_iter()
+        .any(|plen| wc.len() > kc.len() && plen <= wc.len() && osa_leq(&kc, &wc[..plen], 1))
+}
+
+/// Match fuzzy di una keyword (anche multi-parola: "tempo fa") sulle parole della richiesta.
+fn fuzzy_has(words: &[&str], keyword: &str) -> bool {
+    let kws: Vec<&str> = keyword.split_whitespace().collect();
+    if kws.is_empty() || words.len() < kws.len() {
+        return false;
+    }
+    words
+        .windows(kws.len())
+        .any(|win| win.iter().zip(&kws).all(|(w, k)| word_matches(k, w)))
+}
+
 fn selected_categories(request: &str) -> Vec<&'static str> {
-    let r = request.to_lowercase();
-    let has = |ks: &[&str]| ks.iter().any(|k| r.contains(k));
+    let r = norm(request);
+    let words: Vec<&str> = r.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    // Prima il match ESATTO di sempre (substring, zero regressioni), poi il fuzzy anti-refuso:
+    // "che tempi fa" DEVE dare weather — senza il tool nel prompt nessun modello può chiamarlo.
+    let has = |ks: &[&str]| {
+        ks.iter().any(|k| {
+            let kn = norm(k);
+            r.contains(&kn) || fuzzy_has(&words, &kn)
+        })
+    };
     let mut cats = vec!["core"];
     if has(&["email", "mail", "posta", "casella", "inbox", "scritto", "messaggi", "rispondi",
              "risposta", "invia", "inviat", "manda", "scrivi a", "scrivere a", "mittente"]) {
@@ -123,9 +205,13 @@ fn selected_categories(request: &str) -> Vec<&'static str> {
         cats.push("web");
     }
     // weather include set_location: "dove sono/mia posizione/imposta città" → il modello sa dove sei.
-    if has(&["meteo", "tempo fa", "che tempo", "temperatura", "previsioni", "pioggia", "pioverà",
-             "dove sono", "mia posizione", "la mia città", "imposta la città", "dove mi trovo",
-             "gradi", "farà caldo", "farà freddo", "clima"]) {
+    // "il tempo" copre le forme naturali "il tempo per/di domani", "com'è il tempo", "dimmi il
+    // tempo" (caso reale 17/07: senza, weather restava fuori dal prompt e il modello negava di
+    // avere i tool). Falso positivo tipo "il tempo vola" = solo 2 spec in più nel prompt, ok.
+    if has(&["meteo", "tempo fa", "che tempo", "il tempo", "tempo domani", "temperatura",
+             "previsioni", "pioggia", "pioverà", "dove sono", "mia posizione", "la mia città",
+             "imposta la città", "dove mi trovo", "gradi", "farà caldo", "farà freddo",
+             "fa caldo", "fa freddo", "clima"]) {
         cats.push("weather");
     }
     cats
@@ -285,15 +371,33 @@ impl ToolRegistry {
     /// `title`/`when`. ⚠️ L'ordine dei required è quello dello schema → il dataset deve emettere gli
     /// argomenti in quest'ordine (li costruisce come mappe ordinate, quindi coerente).
     pub fn tool_call_grammar(&self) -> String {
+        Self::build_grammar(&self.tools.iter().collect::<Vec<_>>())
+    }
+
+    /// Grammatica GBNF sul SOTTOINSIEME routed (stessi tool del prompt): quando il modello apre
+    /// `<tool_call>` è FISICAMENTE impossibile che emetta un nome fuori dai pochi pertinenti, un
+    /// JSON rotto o argomenti di schema sbagliato. È la leva più forte: non "insegna" a scegliere
+    /// tra pochi, glielo IMPONE. Se il sottoinsieme è vuoto (mai: core è sempre incluso) → nessuna
+    /// costrizione (grammatica di tutti, come fallback).
+    pub fn tool_call_grammar_for(&self, request: &str) -> String {
+        let sel = self.selected_tools(request);
+        if sel.is_empty() {
+            self.tool_call_grammar()
+        } else {
+            Self::build_grammar(&sel)
+        }
+    }
+
+    fn build_grammar(tools: &[&Box<dyn Tool>]) -> String {
         let mut g = String::new();
         // root: name-object accoppiati, uno per tool → ( call0 | call1 | … )
-        let calls: Vec<String> = (0..self.tools.len()).map(|i| format!("call{i}")).collect();
+        let calls: Vec<String> = (0..tools.len()).map(|i| format!("call{i}")).collect();
         g.push_str(r#"root ::= space "{" space "\"name\"" space ":" space ( "#);
         g.push_str(&calls.join(" | "));
         g.push_str(r#" ) space "}" space "</tool_call>""#);
         g.push('\n');
         // callN: "<name>" , "arguments": <args-object-di-quel-tool>
-        for (i, t) in self.tools.iter().enumerate() {
+        for (i, t) in tools.iter().enumerate() {
             let s = t.spec();
             let args = args_object_grammar(&s.parameters);
             g.push_str(&format!(
@@ -372,17 +476,23 @@ impl ToolRegistry {
     /// keyword. Per una conversazione ("ciao") → 2 tool → prompt ~300 tok → niente crash.
     /// Per "leggi le email" → core+email → ~700 tok → sotto la soglia (~960).
     ///
-    /// ⚠️ DRIFT col training (vedi `selected_categories`): oggi il dataset NON replica questa
-    /// selezione (mette tutti-24), quindi train ≠ runtime sul blocco <tools>. In attesa della
-    /// decisione del revisore (compattare/selezionare il generatore, o togliere la selezione qui).
+    /// A RUNTIME prompt e grammatica sono ora UNIFICATI sullo stesso sottoinsieme (`selected_tools`):
+    /// il modello vede i pochi tool pertinenti E la GBNF gli permette di chiamare solo quelli. Resta
+    /// un drift SOLO lato training (il dataset mette il catalogo pieno nel blocco <tools>) — è compito
+    /// del curatore allinearlo; mostrare MENO tool a runtime che in addestramento è sicuro.
     pub fn prompt_block_for(&self, request: &str) -> String {
+        self.render(&self.selected_tools(request))
+    }
+
+    /// Il SOTTOINSIEME di tool pertinenti alla richiesta — UNICA fonte per prompt E grammatica, così
+    /// il modello vede e PUÒ chiamare esattamente gli stessi 3-8 strumenti (mai i 30 interi). `core`
+    /// (datetime, calculator) è sempre incluso da `selected_categories`.
+    fn selected_tools(&self, request: &str) -> Vec<&Box<dyn Tool>> {
         let cats = selected_categories(request);
-        let selected: Vec<&Box<dyn Tool>> = self
-            .tools
+        self.tools
             .iter()
             .filter(|t| cats.contains(&tool_category(&t.spec().name)))
-            .collect();
-        self.render(&selected)
+            .collect()
     }
 
     /// Qwen2.5 native tool-calling system block (Hermes-style) for the given tools.
@@ -452,6 +562,36 @@ mod selection_tests {
     }
 
     #[test]
+    fn refusi_comuni_attivano_comunque_il_tool() {
+        // il caso REALE che ha aperto il bug: "che tempi fa" (refuso) non metteva weather
+        // nel prompt → NESSUN modello poteva chiamare il meteo, nemmeno un 70B.
+        assert!(selected_categories("che tempi fa a Milano?").contains(&"weather"));
+        assert!(selected_categories("guarda l'agneda di domani").contains(&"calendar")); // inversione
+        assert!(selected_categories("ho un appuntamneto con Marco").contains(&"calendar")); // inversione nel prefisso
+        assert!(selected_categories("leggi i messagi ricevuti").contains(&"email")); // lettera mancante
+        assert!(selected_categories("le previsoni per domani").contains(&"weather")); // lettera mancante
+        assert!(selected_categories("che tempo fa senza accento perche si").contains(&"weather")); // norm accenti
+    }
+
+    #[test]
+    fn fuzzy_non_scatta_su_parole_diverse() {
+        // parole corte restano esatte (niente fuzzy su "sms"/"mail") e frasi normali restano core-only
+        assert_eq!(selected_categories("dimmi una cosa divertente"), vec!["core"]);
+        assert_eq!(selected_categories("mi racconti una storia?"), vec!["core"]);
+        // "tempo" da solo (senza "il"/"fa"/"che") resta conversazione: niente weather
+        assert_eq!(selected_categories("non ho tempo oggi, facciamo domani"), vec!["core"]);
+    }
+
+    #[test]
+    fn forme_naturali_del_meteo() {
+        // caso reale 17/07: "il tempo per domani" non attivava weather → il modello, senza tool,
+        // rispondeva "non posso chiamare i tool". La forma "il tempo …" DEVE attivare la famiglia.
+        assert!(selected_categories("puoi dirmi il tempo per domani?").contains(&"weather"));
+        assert!(selected_categories("com'è il tempo a Bari?").contains(&"weather"));
+        assert!(selected_categories("domani fa caldo?").contains(&"weather"));
+    }
+
+    #[test]
     fn compact_tool_value_toglie_le_description_dei_parametri() {
         let spec = ToolSpec {
             name: "x".into(),
@@ -515,6 +655,58 @@ mod selection_tests {
         // datetime (zero argomenti) → object generico
         let dt = g.lines().find(|l| l.contains(r#"\"datetime\""#)).expect("regola datetime");
         assert!(dt.trim_end().ends_with("object"), "datetime → arguments object generico");
+    }
+
+    #[test]
+    fn grammar_accetta_il_formato_gold_train_uguale_runtime() {
+        // La stringa emessa sotto grammatica DEVE == la stringa dei gold (json.dumps ChatML).
+        // weather è chiamato nei gold ANCHE con args vuoti {} (posizione corrente, 10 esempi):
+        // la sua regola args DEVE essere `object` generico, non forzare `location` → se un domani
+        // qualcuno mette location required su Weather, questo test salta PRIMA di rompere il training.
+        use crate::core::calendar::Calendar;
+        use crate::core::crypto::Crypto;
+        use crate::core::email::EmailStore;
+        use crate::core::memory::Memory;
+        use std::sync::{Arc, Mutex};
+        let crypto = Arc::new(Crypto::from_key(&[5u8; 32]));
+        let mem = Arc::new(Memory::open(":memory:", crypto.clone()).unwrap());
+        let email = Arc::new(EmailStore::open(":memory:", crypto.clone()).unwrap());
+        let cal = Arc::new(Calendar::open(":memory:", crypto).unwrap());
+        let g = ToolRegistry::build(email, Arc::new(Mutex::new(None)), cal, mem).tool_call_grammar();
+        let w = g.lines().find(|l| l.contains(r#"\"weather\""#)).expect("regola weather");
+        assert!(w.trim_end().ends_with("object"), "weather → args object generico (accetta {{}} dei gold)");
+        // calendar_add: i gold emettono {title, when} in QUEST'ordine = ordine `required` dello schema
+        let add = g.lines().find(|l| l.contains(r#"\"calendar_add\""#)).expect("regola calendar_add");
+        let it = add.find(r#"\"title\""#).unwrap();
+        let iw = add.find(r#"\"when\""#).unwrap();
+        assert!(it < iw, "title prima di when, come nei gold (ordine required)");
+    }
+
+    #[test]
+    fn grammar_routed_contiene_solo_i_tool_pertinenti() {
+        use crate::core::calendar::Calendar;
+        use crate::core::crypto::Crypto;
+        use crate::core::email::EmailStore;
+        use crate::core::memory::Memory;
+        use std::sync::{Arc, Mutex};
+        let crypto = Arc::new(Crypto::from_key(&[7u8; 32]));
+        let mem = Arc::new(Memory::open(":memory:", crypto.clone()).unwrap());
+        let email = Arc::new(EmailStore::open(":memory:", crypto.clone()).unwrap());
+        let cal = Arc::new(Calendar::open(":memory:", crypto).unwrap());
+        let reg = ToolRegistry::build(email, Arc::new(Mutex::new(None)), cal, mem);
+
+        // 🔑 il punto: per una richiesta meteo, la grammatica ammette weather (+ core) ma NON email,
+        // agenda, file, peer, telefono → il modello NON PUÒ emettere un tool fuori contesto.
+        let g = reg.tool_call_grammar_for("che tempo fa a modena?");
+        assert!(g.contains(r#"\"weather\""#), "weather deve esserci");
+        assert!(g.contains(r#"\"datetime\""#), "core sempre presente");
+        for vietato in [r#"\"email_recent\""#, r#"\"calendar_add\""#, r#"\"fs_read\""#, r#"\"peer_ask\""#, r#"\"phone_call\""#] {
+            assert!(!g.contains(vietato), "la grammatica routed NON deve contenere {vietato}");
+        }
+        // conversazione pura ("ciao") → solo core, niente famiglie
+        let gc = reg.tool_call_grammar_for("ciao, come stai?");
+        assert!(gc.contains(r#"\"calculator\""#));
+        assert!(!gc.contains(r#"\"web_search\""#) && !gc.contains(r#"\"email_recent\""#));
     }
 
     // ── #4: validazione argomenti per-schema (tutti i dialetti, prima del dispatch) ────────

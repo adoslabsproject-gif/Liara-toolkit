@@ -352,7 +352,7 @@ function ChatView({ contact, onBack }: { contact: Contact; onBack: () => void })
   const aiHistory = (m: ChatMsg[]) => m.filter((x) => !x.doc).map((x) => [x.dir === "me" ? "me" : "peer", x.text] as [string, string]);
   // ogni risposta del mio Liara è guidata dall'obiettivo + materiali del task
   const genReply = (history: [string, string][]) =>
-    invoke<string>("liara_reply", { history, goal: task.goal || null, materials: materialsText(task) || null });
+    invoke<string>("liara_reply", { peer: contact.id, history, goal: task.goal || null, materials: materialsText(task) || null });
   useEffect(() => {
     if (!aiMode || replyingRef.current) return;
     if (msgs.length === 0) return;

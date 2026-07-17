@@ -1,5 +1,6 @@
 // Drawer "Modello AI": elenco modelli scaricabili/attivabili, con tag ↻ Usa / ⬇ Scarica / IN USO,
-// eliminazione e progresso download. Riceve l'API di useModelDownload e `onBack`. JSX verbatim.
+// eliminazione e progresso download. La creatività (temperatura) NON è più qui: sta nel composer
+// (icona 🌡️ → popover slider), più a portata di mano — vedi App.tsx.
 import { t } from "./i18n";
 import type { ModelDownloadApi } from "./useModelDownload";
 

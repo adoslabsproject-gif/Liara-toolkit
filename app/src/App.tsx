@@ -5,6 +5,7 @@ import { t, useLang } from "./i18n";
 import { ROOT, TOOL_LABELS } from "./constants";
 import type { Node, Msg } from "./constants";
 import { haptic, speak, stopSpeak, flushSpeak, startRecAndroid, stopRecAndroid, setAndroid, getAndroid, setOnTtsIdle } from "./audio";
+import { defaultTemp, localTemp } from "./models";
 import { isRich, cleanForSpeech, fileIcon } from "./text";
 import { AssistantBody } from "./markdown";
 import { activePath, toMsg, childrenOf as treeChildrenOf, chainTo as treeChainTo } from "./tree";
@@ -88,12 +89,33 @@ export default function App() {
     try { localStorage.setItem("liara_resp_len", next); } catch { /* */ }
     haptic(20);
   };
+  // Icona della lunghezza risposte: cambia a ogni preset ("riempimento" crescente) → feedback visivo immediato.
+  const RESP_META = {
+    breve: { icon: "◔", label: t("Breve", "Short") },
+    media: { icon: "◑", label: t("Media", "Medium") },
+    lunga: { icon: "◕", label: t("Lunga", "Long") },
+    massima: { icon: "●", label: t("Massima", "Max") },
+  } as const;
   useEffect(() => {
     invoke<{ android?: boolean }>("device_caps")
       .then((c) => { if (typeof c.android === "boolean") { setIsAndroid(c.android); setAndroid(c.android); } })
       .catch(() => {});
   }, []);
   const md = useModelDownload(isAndroid, initializing, setInitializing); // modello/download (useModelDownload.ts)
+  // Creatività (temperatura) PER MODELLO locale: stato reattivo (mirror di localStorage) così l'icona
+  // nel composer + il popover si aggiornano subito e `send` la passa senza rileggere. Il cloud non usa temp.
+  const [temp, setTemp] = useState(() => localTemp(md.activeModel));
+  const [showTempPop, setShowTempPop] = useState(false);
+  useEffect(() => { setTemp(localTemp(md.activeModel)); setShowTempPop(false); }, [md.activeModel.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  const saveTemp = (v: number) => {
+    setTemp(v);
+    try { localStorage.setItem(`liara_temp:${md.activeModel.id}`, String(v)); } catch { /* */ }
+  };
+  const resetTemp = () => {
+    try { localStorage.removeItem(`liara_temp:${md.activeModel.id}`); } catch { /* */ }
+    setTemp(defaultTemp(md.activeModel));
+    haptic(15);
+  };
   // Ragionamento (thinking di Qwen3): ACCESO di default (2026-07-06). Il LoRA v6 (attuale) USA il
   // ragionamento per chiamare i tool correttamente — senza, i tool non partono o vengono usati male.
   // (Era OFF per il v4, addestrato col blocco <think> vuoto; superato dal v6.) Chiave bumped a _v3 così i
@@ -442,7 +464,7 @@ export default function App() {
       const respMode = cloudMode ? "cloud" : isAndroid ? "mobile" : "desktop";
       const maxTokens = RESP_TOKENS[respMode][respLen];
       if (cloudMode) await invoke("remote_generate", { messages, image: image ?? null, train: localStorage.getItem("liara_train") === "1", conversationId: convId.current, maxTokens });
-      else await invoke("generate", { messages, maxTokens });
+      else await invoke("generate", { messages, maxTokens, temperature: temp });
     } catch (err) {
       setNodes((nd) => (nd[assistantId] ? { ...nd, [assistantId]: { ...nd[assistantId], content: "⚠️ " + String(err) } } : nd));
       setBusy(false);
@@ -457,7 +479,7 @@ export default function App() {
     speakBuf.current = "";
     if (autoSpeakRef.current) stopSpeak();
     try {
-      await invoke("describe_image", { imageB64, prompt });
+      await invoke("describe_image", { imageB64, prompt, temperature: temp });
     } catch (err) {
       setNodes((nd) => (nd[assistantId] ? { ...nd, [assistantId]: { ...nd[assistantId], content: "⚠️ " + String(err) } } : nd));
       setBusy(false);
@@ -728,10 +750,9 @@ export default function App() {
     setShowPerms(true);
   }
 
-  // Nome breve del modello in uso, per l'header e il menu (cloud o locale).
-  const modelName = cloudMode
-    ? "Cloud 32B"
-    : `${md.activeModel.id.includes("gemma") ? "Gemma" : "Liara"} ${md.activeModel.id.includes("12b") ? "12B" : md.activeModel.id.includes("e4b") ? "E4B" : md.activeModel.id.includes("4b") ? "4B" : "1.7B"}`;
+  // Nome breve del modello in uso, per l'header e il menu (cloud o locale). Dal catalogo (tag), non
+  // da euristiche sul nome: coi modelli dinamici (models.json) l'id non è più prevedibile.
+  const modelName = cloudMode ? "Cloud 32B" : md.activeModel.tag;
 
   return (
     <div className="app">
@@ -865,6 +886,22 @@ export default function App() {
         </div>
       )}
       <div className="composer">
+        {/* Popover creatività: backdrop full-screen che chiude al tap fuori; il pannello ferma la propagazione. */}
+        {showTempPop && !cloudMode && (
+          <>
+            <div className="pop-backdrop" onClick={() => setShowTempPop(false)} />
+            <div className="temp-pop" onClick={(e) => e.stopPropagation()}>
+              <div className="temp-pop-head">
+                🌡️ <b>{md.activeModel.tag}</b> · {t("creatività", "creativity")} <b>{temp.toFixed(2)}</b>
+                {Math.abs(temp - defaultTemp(md.activeModel)) > 0.001 && (
+                  <span className="temp-reset" role="button" onClick={resetTemp}>↺ {defaultTemp(md.activeModel).toFixed(2)}</span>
+                )}
+              </div>
+              <input type="range" min={0.1} max={1.5} step={0.05} value={temp} onChange={(e) => saveTemp(parseFloat(e.target.value))} />
+              <div className="temp-pop-legend"><span>{t("preciso", "precise")}</span><span>{t("creativo", "creative")}</span></div>
+            </div>
+          </>
+        )}
         <div className={`composer-box ${busy ? "busy" : ""}`}>
         <textarea
           ref={taRef}
@@ -939,6 +976,14 @@ export default function App() {
             >{listening ? "🔴" : "🎤"}</button>
           );
         })()}
+        {/* Lunghezza risposte: icona che cambia a ogni preset (◔◑◕●) + ciclo al tap. Vale cloud e locale. */}
+        {!busy && (
+          <button className="ctool" title={`${t("Lunghezza risposte", "Response length")}: ${RESP_META[respLen].label}`} onClick={cycleRespLen}>{RESP_META[respLen].icon}</button>
+        )}
+        {/* Creatività (temperatura): SOLO modello locale. Tap → popover slider; tap fuori → chiude. */}
+        {!busy && !cloudMode && (
+          <button className={`ctool${showTempPop ? " on" : ""}`} title={t("Creatività (temperatura)", "Creativity (temperature)")} onClick={() => { setShowTempPop((v) => !v); haptic(15); }}>🌡️</button>
+        )}
         </div>
         {busy ? (
           <button className="csend stop" title={t("Ferma", "Stop")} onClick={() => { stoppedRef.current = true; if (rafTok.current != null) { cancelAnimationFrame(rafTok.current); rafTok.current = null; } pendingTok.current = ""; invoke("stop_generation").catch(() => {}); setBusy(false); setStatus(""); setToolUsed(""); haptic(35); }}>■</button>
@@ -1018,7 +1063,7 @@ export default function App() {
         <MenuDrawer
           theme={theme}
           emailUnread={email.unread}
-          modelTag={cloudMode ? "☁️ Cloud 32B" : `${md.activeModel.id.includes("gemma") ? "Gemma" : "Liara"} ${md.activeModel.id.includes("12b") ? "12B" : md.activeModel.id.includes("e4b") ? "E4B" : md.activeModel.id.includes("4b") ? "4B" : "1.7B"} ${md.activeModel.flag}`}
+          modelTag={cloudMode ? "☁️ Cloud 32B" : `${md.activeModel.tag} ${md.activeModel.flag}`}
           autoSpeak={autoSpeak}
           thinking={thinking}
           cloud={cloudMode}

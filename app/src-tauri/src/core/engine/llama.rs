@@ -313,10 +313,24 @@ impl Engine for LlamaEngine {
         if common >= tokens.len() {
             common = tokens.len().saturating_sub(1);
         }
-        // evict the diverging suffix from the KV cache
+        // evict the diverging suffix from the KV cache.
+        // 🔴 IBRIDI/RICORRENTI (LFM2, Granite hybrid, Mamba…): llama.cpp NON supporta la rimozione
+        // PARZIALE dello stato (una conv/SSM non si riavvolge a metà) → seq_rm ritorna FALSE. Il
+        // vecchio `.ok()` buttava via il false, lo stato restava incoerente e il decode successivo
+        // falliva ("decode prompt" al 2° turno del 1.2B). Fallback: cache azzerata e re-prefill
+        // COMPLETO — sui piccoli è questione di secondi, la correttezza vince sul prefix-caching.
         if common < st.tokens.len() {
-            st.ctx.clear_kv_cache_seq(Some(0), Some(common as u32), None).ok();
-            st.tokens.truncate(common);
+            let partial_ok = st
+                .ctx
+                .clear_kv_cache_seq(Some(0), Some(common as u32), None)
+                .unwrap_or(false);
+            if partial_ok {
+                st.tokens.truncate(common);
+            } else {
+                st.ctx.clear_kv_cache_seq(Some(0), None, None).ok();
+                st.tokens.clear();
+                common = 0;
+            }
         }
 
         // decode only the new suffix, IN CHUNK di PREFILL_BATCH token.

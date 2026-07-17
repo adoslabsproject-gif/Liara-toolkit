@@ -12,9 +12,11 @@ use tauri::{Emitter, State, WebviewWindow};
 pub async fn describe_image(
     image_b64: String,
     prompt: String,
+    temperature: Option<f32>, // stessa creatività per-modello della chat (slider): il turno vision È conversazione
     state: State<'_, AppState>,
     window: WebviewWindow,
 ) -> Result<String, String> {
+    let temperature = temperature.unwrap_or(0.7).clamp(0.1, 1.5);
     let engine_slot = state.engine.clone();
     let model_path = state.model_path.clone();
     let memory = state.memory.clone();
@@ -80,6 +82,7 @@ pub async fn describe_image(
             &messages,
             thinking,
             1024, // descrizione immagine: budget standard
+            temperature,
             &cancel,
             &mut sink,
         )?;

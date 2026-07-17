@@ -304,11 +304,14 @@ pub async fn warmup(state: State<'_, AppState>, window: WebviewWindow) -> Result
 pub async fn generate(
     messages: Vec<Message>,
     max_tokens: Option<usize>, // budget risposta scelto dall'utente (preset per-dispositivo); None = default
+    temperature: Option<f32>,  // creatività scelta dall'utente PER MODELLO locale (slider); None = 0.7
     state: State<'_, AppState>,
     window: WebviewWindow,
 ) -> Result<String, String> {
     // clamp di sicurezza per il LOCALE (desktop/mobile): mai sotto 128, mai oltre 8192 (contesto modelli locali)
     let max_tokens = max_tokens.unwrap_or(1024).clamp(128, 8192);
+    // clamp: sotto 0.1 il sampler degenera in greedy-loop sui piccoli, sopra 1.5 è rumore
+    let temperature = temperature.unwrap_or(0.7).clamp(0.1, 1.5);
     let model_path = crate::core::paths::text_model(); // rilegge il modello ATTIVO (active_model), non il default fissato all'avvio
     let engine_slot = state.engine.clone();
     let memory = state.memory.clone();
@@ -388,6 +391,7 @@ pub async fn generate(
             &messages,
             thinking,
             max_tokens,
+            temperature,
             &cancel,
             &mut sink,
         )?;

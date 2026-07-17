@@ -95,8 +95,21 @@ body { background: var(--bg); color: var(--txt); font-family: var(--font); }
 .themename { flex: 1; text-align: left; }
 .themecheck { color: var(--accent); font-weight: 700; font-size: 17px; }
 
-.composer { padding: 8px 12px calc(8px + env(safe-area-inset-bottom));
+.composer { position: relative; padding: 8px 12px calc(8px + env(safe-area-inset-bottom));
   border-top: 1px solid var(--line); background: var(--panel); }
+/* Popover creatività: ancorato SOPRA il box composer, largo quanto la barra (slider comodo col pollice). */
+.pop-backdrop { position: fixed; inset: 0; z-index: 40; }
+.temp-pop { position: absolute; z-index: 41; left: 12px; right: 12px; bottom: calc(100% - 6px);
+  background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 12px 16px 14px;
+  box-shadow: 0 10px 34px rgba(0,0,0,.32); display: flex; flex-direction: column; gap: 8px;
+  animation: temp-pop-in .14s ease; }
+@keyframes temp-pop-in { from { transform: translateY(8px); opacity: 0; } }
+.temp-pop-head { font-size: 13px; color: var(--mut); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.temp-pop-head b { color: var(--txt); font-variant-numeric: tabular-nums; }
+.temp-reset { margin-left: auto; color: var(--accent); cursor: pointer; font-weight: 600; }
+.temp-pop input[type="range"] { width: 100%; accent-color: var(--accent); }
+.temp-pop-legend { display: flex; justify-content: space-between; font-size: 11px; color: var(--mut); }
+.ctool.on { background: var(--accent); color: #fff; }
 /* Box unico stile Claude: textarea auto-espandente SOPRA, barra tasti SOTTO, dentro un bordo arrotondato. */
 .composer-box { display: flex; flex-direction: column; gap: 4px; background: var(--bg);
   border: 1px solid var(--line); border-radius: 22px; padding: 8px 10px 6px; transition: border-color .15s ease; }
@@ -152,7 +165,9 @@ body { background: var(--bg); color: var(--txt); font-family: var(--font); }
 .row.assistant .msg { max-width: 94%; }
 .row.assistant .bubble:has(.chartbox), .row.assistant .bubble:has(table) { width: 100%; }
 .row.assistant .msg:has(.chartbox) { max-width: 98%; }
-.row.user .msg { align-items: flex-end; }
+/* .msg è un BLOCCO (flex column) dentro la row block: text-align:right della row non lo sposta —
+   serve margin-left:auto o la bolla utente resta al bordo destro dell'80%, "quasi al centro". */
+.row.user .msg { align-items: flex-end; margin-left: auto; }
 .msgbar { display: flex; align-items: center; gap: 10px; height: 20px; opacity: 0;
   transition: opacity .15s; font-size: 12px; color: var(--mut); }
 .row:hover .msgbar { opacity: 1; }
@@ -185,6 +200,9 @@ body { background: var(--bg); color: var(--txt); font-family: var(--font); }
   padding: calc(18px + env(safe-area-inset-top)) 18px calc(18px + env(safe-area-inset-bottom));
   display: flex; flex-direction: column; gap: 14px; animation: slidein .18s ease; }
 @keyframes slidein { from { transform: translateX(30px); opacity: 0; } }
+/* Anti-schiacciamento: il drawer è flex column con overflow-y — senza questo, coi modelli del
+   catalogo dinamico le righe si COMPRIMONO (flex-shrink default) invece di far scattare lo scroll. */
+.drawer > * { flex-shrink: 0; }
 .drawer-head { display: flex; align-items: center; justify-content: space-between; }
 .drawer-head h2 { margin: 0; font-size: 20px; }
 .hint { color: var(--mut); font-size: 13px; margin: 0; line-height: 1.5; }
@@ -371,9 +389,12 @@ body { background: var(--bg); color: var(--txt); font-family: var(--font); }
    nulla". Vale per tutti i modali (consenso, camera): sono dialoghi interattivi, sempre topmost. */
 .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: flex;
   align-items: center; justify-content: center; z-index: 300; padding: 20px; }
+/* `safe center` + overflow-y: col catalogo dinamico la lista modelli può superare lo schermo —
+   senza `safe` il flex centrato TAGLIA il contenuto da sopra E da sotto senza scroll possibile. */
 .load-overlay { position: fixed; inset: 0; z-index: 200; display: flex; flex-direction: column;
-  align-items: center; justify-content: center; gap: 14px; padding: 24px; text-align: center;
-  background: var(--bg); }
+  align-items: center; justify-content: center; justify-content: safe center; gap: 14px;
+  padding: 24px; text-align: center; background: var(--bg); overflow-y: auto; }
+.load-overlay > * { flex-shrink: 0; }
 .load-spinner { width: 56px; height: 56px; border-radius: 50%; border: 4px solid var(--line);
   border-top-color: var(--accent); animation: spin .9s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }

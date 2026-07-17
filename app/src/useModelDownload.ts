@@ -5,7 +5,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { t, setLang } from "./i18n";
-import { M, MODELS } from "./models";
+import { M, initialCatalog, loadCatalog, resolveVariants } from "./models";
 import type { Model } from "./models";
 
 export type Dl = { done: number; total: number; label?: string };
@@ -14,19 +14,33 @@ export function useModelDownload(isAndroid: boolean, initializing: boolean, setI
   const [needDownload, setNeedDownload] = useState(false);
   const [dl, setDl] = useState<Dl | null>(null);
   const [dlErr, setDlErr] = useState("");
-  const [modelId, setModelId] = useState(() => { try { return localStorage.getItem("liara_model") || "1.7b-it"; } catch { return "1.7b-it"; } });
+  // Default VUOTO per i nuovi installati: activeModel ripiega sul primo modello NON deprecato del
+  // catalogo (oggi Gemma E4B, domani il primo della fila nuova). Il vecchio default "1.7b-it"
+  // avrebbe mostrato il Qwen deprecato nel menù iniziale dei nuovi utenti (regola "visibile se attivo").
+  const [modelId, setModelId] = useState(() => { try { return localStorage.getItem("liara_model") || ""; } catch { return ""; } });
   const [showModel, setShowModel] = useState(false);
   const [modelsPresent, setModelsPresent] = useState<Record<string, boolean>>({});
   const [switchTo, setSwitchTo] = useState<string | null>(null);
   const [outdated, setOutdated] = useState(false);
   const dlCancelRef = useRef(false);
+  // Catalogo DINAMICO: parte dall'ultima copia buona (cache) o dal fallback compilato, poi si
+  // aggiorna dal server (models.json su NHA) — aggiungere un modello non richiede rebuild dell'app.
+  const [models, setModels] = useState<Model[]>(() => resolveVariants(initialCatalog(), isAndroid));
+  useEffect(() => {
+    loadCatalog((cmd) => invoke<string>(cmd)).then((c) => { if (c) setModels(resolveVariants(c, isAndroid)); });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  const activeModel = MODELS.find((m) => m.id === modelId) || MODELS[0];
-  // Vision disponibile (→ mostra 📎): SOLO i modelli con visione nativa (Gemma 4, che ha il proprio
-  // mmproj), su APK e desktop. I Qwen (1.7b/4b) sono testo-only → niente 📎 (il vecchio companion 3B è rimosso).
+  const activeModel = models.find((m) => m.id === modelId) || models.find((m) => !m.status) || models[0];
+  // Vision disponibile (→ mostra 📎): SOLO i modelli con visione nativa (mmproj proprio), su APK e desktop.
   const hasVision = !!activeModel.mmprojNative;
-  // Il 12B è desktop-only: su Android (telefono) non ci sta (7 GB, serve 16 GB RAM) → nascosto dal selettore.
-  const visibleModels = MODELS.filter((m) => !m.desktopOnly || !isAndroid);
+  // Nascosti dal selettore: i desktop-only su Android (non ci stanno) e i "deprecated" — questi ultimi
+  // restano visibili SOLO a chi li ha già installati o attivi (migrazione dolce, ordine 2026-07-16).
+  // Ordine di presentazione: dal più leggero al più pesante (il json del server non garantisce ordine).
+  const visibleModels = models
+    .filter((m) =>
+      (!m.desktopOnly || !isAndroid) && (m.status !== "deprecated" || m.id === modelId || modelsPresent[m.file]))
+    .sort((a, b) => (a.bytes || Number.MAX_SAFE_INTEGER) - (b.bytes || Number.MAX_SAFE_INTEGER));
 
   // Versioning: se il file scaricato ha uno SHA diverso da quello atteso → c'è un modello nuovo su HF.
   useEffect(() => {
@@ -38,13 +52,14 @@ export function useModelDownload(isAndroid: boolean, initializing: boolean, setI
 
   // Download robusto: RETRY automatico (fino a 6 tentativi). Il backend riprende SEMPRE da dove era.
   const startDownload = async (model: Model = activeModel, restart = false) => {
-    // Proteggi i telefoni deboli: il 4B (pesante) vuole RAM ≥12GB e GPU robusta.
-    if (model.id.includes("4b")) {
+    // Proteggi i telefoni deboli: il gate è DICHIARATIVO (ramMinGb dal catalogo), niente euristiche
+    // sul nome. Sui modelli pesanti (≥10 GB RAM richiesti) blocca anche le GPU deboli.
+    if (isAndroid && model.ramMinGb) {
       const caps = await invoke<{ ram_gb: number; weak_gpu: boolean }>("device_caps").catch(() => ({ ram_gb: 16, weak_gpu: false }));
-      if (caps.ram_gb < 10 || caps.weak_gpu) {
+      if (caps.ram_gb < model.ramMinGb || (model.ramMinGb >= 10 && caps.weak_gpu)) {
         setDlErr(t(
-          `Il tuo telefono (${caps.ram_gb} GB RAM) non regge il modello Avanzato (4B): si bloccherebbe. Usa il Bilanciato (1.7B) 👍`,
-          `Your phone (${caps.ram_gb} GB RAM) can't handle the Advanced (4B): it would freeze. Use the Balanced (1.7B) 👍`
+          `Il tuo telefono (${caps.ram_gb} GB RAM) non regge "${model.size}" (servono ${model.ramMinGb} GB+): si bloccherebbe. Scegli un modello più leggero 👍`,
+          `Your phone (${caps.ram_gb} GB RAM) can't handle "${model.size}" (needs ${model.ramMinGb} GB+): it would freeze. Pick a lighter model 👍`
         ));
         return;
       }
@@ -58,7 +73,7 @@ export function useModelDownload(isAndroid: boolean, initializing: boolean, setI
         if (model.mmprojNative) {
           const mp = model.mmprojNative;
           setDl({ done: 0, total: mp.bytes, label: t("Visione (foto/documenti)", "Vision (photos/docs)") });
-          await invoke("download_model", { url: `${M}/${mp.file}`, sha256: mp.sha, bytes: mp.bytes, filename: mp.file });
+          await invoke("download_model", { url: mp.url || `${M}/${mp.file}`, sha256: mp.sha, bytes: mp.bytes, filename: mp.file });
         }
         await invoke("set_active_model", { filename: model.file });
         try { localStorage.setItem("liara_model", model.id); } catch { /* */ }
@@ -115,7 +130,7 @@ export function useModelDownload(isAndroid: boolean, initializing: boolean, setI
   // Apre il drawer modelli caricando prima quali sono presenti su disco (per il tag ↻ Usa / ⬇ Scarica).
   const openModelDrawer = async () => {
     const p: Record<string, boolean> = {};
-    for (const m of MODELS) p[m.file] = await invoke<boolean>("model_present", { filename: m.file }).catch(() => false);
+    for (const m of models) p[m.file] = await invoke<boolean>("model_present", { filename: m.file }).catch(() => false);
     setModelsPresent(p);
     setShowModel(true);
   };

@@ -136,6 +136,13 @@ fn parse_tool_calls_from_text(raw: &str) -> Vec<Value> {
             None => break,
         }
     }
+    // Formato Mistral TESTUALE (visto live col Mistral-Liara quando la chiamata esce nel content
+    // invece che nel campo strutturato): "[TOOL_CALLS]name{args}" (anche ripetuto) oppure
+    // "[TOOL_CALLS][{"name":…,"arguments":…}]" (array). Senza questo, la chiamata verrebbe
+    // mostrata come testo e mai eseguita — stessa classe di bug del <tool_call> perso.
+    if out.is_empty() {
+        parse_mistral_text_calls(raw, &mut out);
+    }
     // JSON nudo (senza tag): tutto il content è un oggetto {"name":…,"arguments":…}
     if out.is_empty() {
         let t = raw.trim();
@@ -144,6 +151,55 @@ fn parse_tool_calls_from_text(raw: &str) -> Vec<Value> {
         }
     }
     out
+}
+
+/// Primo array JSON bilanciato in `s` (gemello di `first_json_object`, per il formato array di Mistral).
+fn first_json_array(s: &str) -> Option<String> {
+    let start = s.find('[')?;
+    let b = s.as_bytes();
+    let (mut depth, mut in_str, mut esc) = (0i32, false, false);
+    for i in start..s.len() {
+        let c = b[i] as char;
+        if in_str {
+            if esc { esc = false } else if c == '\\' { esc = true } else if c == '"' { in_str = false }
+            continue;
+        }
+        match c {
+            '"' => in_str = true,
+            '[' => depth += 1,
+            ']' => { depth -= 1; if depth == 0 { return Some(s[start..=i].to_string()); } }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Estrae i tool-call dal formato testuale Mistral dopo il marker `[TOOL_CALLS]`.
+fn parse_mistral_text_calls(raw: &str, out: &mut Vec<Value>) {
+    let Some(p) = raw.find("[TOOL_CALLS]") else { return };
+    let mut rest = raw[p + "[TOOL_CALLS]".len()..].trim_start();
+    // forma array: [{"name":…,"arguments":…}, …]
+    if rest.starts_with('[') {
+        if let Some(arr) = first_json_array(rest) {
+            if let Ok(Value::Array(items)) = serde_json::from_str::<Value>(&arr) {
+                for it in items {
+                    if let Some(tc) = tc_from_obj(&it.to_string(), out.len()) { out.push(tc); }
+                }
+            }
+        }
+        return;
+    }
+    // forma name{json}, eventualmente ripetuta ("weather{…}datetime{…}")
+    loop {
+        let Some(brace) = rest.find('{') else { break };
+        let name = rest[..brace].trim();
+        if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') { break; }
+        let Some(obj) = first_json_object(&rest[brace..]) else { break };
+        let idx = out.len();
+        out.push(json!({ "id": format!("call_{idx}"), "type": "function",
+            "function": { "name": name, "arguments": obj } }));
+        rest = rest[brace + obj.len()..].trim_start();
+    }
 }
 
 /// UNA chiamata al 32B (NON-streaming). ⚠️ `stream:false` è OBBLIGATORIO per l'AFFIDABILITÀ dei tool: in
@@ -380,4 +436,47 @@ pub async fn cloud_hello() -> Result<Option<String>, String> {
     })
     .await
     .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_tool_calls_from_text;
+
+    #[test]
+    fn mistral_testuale_nome_fuori_dal_json() {
+        // formato visto LIVE dal Mistral-Liara senza campo tools: [TOOL_CALLS]weather{...}
+        let tc = parse_tool_calls_from_text(r#"[TOOL_CALLS]weather{"location": "Milano"}"#);
+        assert_eq!(tc.len(), 1);
+        assert_eq!(tc[0]["function"]["name"], "weather");
+        assert!(tc[0]["function"]["arguments"].as_str().unwrap().contains("Milano"));
+    }
+
+    #[test]
+    fn mistral_testuale_array() {
+        let tc = parse_tool_calls_from_text(
+            r#"[TOOL_CALLS][{"name":"weather","arguments":{"location":"Roma"}},{"name":"datetime","arguments":{}}]"#,
+        );
+        assert_eq!(tc.len(), 2);
+        assert_eq!(tc[0]["function"]["name"], "weather");
+        assert_eq!(tc[1]["function"]["name"], "datetime");
+    }
+
+    #[test]
+    fn mistral_testuale_ripetuto_e_rumore() {
+        let tc = parse_tool_calls_from_text(r#"[TOOL_CALLS]weather{"location":"Bari"}datetime{}"#);
+        assert_eq!(tc.len(), 2);
+        // testo qualunque senza marker → nessuna chiamata (non deve inventare)
+        assert!(parse_tool_calls_from_text("ciao, che bella giornata [quasi] serena").is_empty());
+    }
+
+    #[test]
+    fn formati_legacy_intatti() {
+        // il formato <tool_call> del 32B resta riconosciuto (retrocompatibilità)
+        let tc = parse_tool_calls_from_text(r#"<tool_call>{"name":"web_search","arguments":{"query":"news"}}</tool_call>"#);
+        assert_eq!(tc.len(), 1);
+        assert_eq!(tc[0]["function"]["name"], "web_search");
+        // JSON nudo
+        let tc = parse_tool_calls_from_text(r#"{"name":"datetime","arguments":{}}"#);
+        assert_eq!(tc.len(), 1);
+    }
 }
