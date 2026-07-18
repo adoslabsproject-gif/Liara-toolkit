@@ -101,4 +101,9 @@ pub trait Engine: Send + Sync {
     fn is_gemma(&self) -> bool {
         false
     }
+    /// Dialetto di prompt del modello: guida template, EOS atomico, formato tool-call e risultato
+    /// (`agent_loop`). Ogni famiglia parla il suo nativo → niente marker testuali fragili. Default Qwen.
+    fn dialect(&self) -> crate::core::agent::Dialect {
+        crate::core::agent::Dialect::Qwen
+    }
 }

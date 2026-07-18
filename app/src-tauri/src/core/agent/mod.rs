@@ -5,6 +5,6 @@ mod parse;
 mod stream;
 
 pub use agent_loop::{run_agent, AgentSink};
-pub use format::{extraction_prompt, format_chat, Message, SYSTEM_PROMPT};
+pub use format::{extraction_prompt, format_chat, Dialect, Message, SYSTEM_PROMPT};
 pub use parse::parse_facts;
 pub use stream::render_full;

@@ -37,7 +37,44 @@ fn first_json_object(s: &str) -> Option<String> {
 /// (`<tool_call>{"name":…}`, usato anche dal tool-forcing), POI il nativo Gemma
 /// (`<|tool_call>call:NAME{…}`). Così un unico punto di estrazione copre entrambi i dialetti.
 pub(super) fn extract_tool_call(raw: &str) -> Option<(String, Value)> {
-    extract_tool_call_qwen(raw).or_else(|| extract_tool_call_gemma(raw))
+    extract_tool_call_qwen(raw)
+        .or_else(|| extract_tool_call_mistral(raw))
+        .or_else(|| extract_tool_call_gemma(raw))
+}
+
+/// Mistral (Nemo/Small): `[TOOL_CALLS][{"name":…,"arguments":{…}}]` (array JSON prefissato). Porto
+/// esatto di `_parse_mistral_toolcall` del training: scansiona l'array bilanciato (ignorando le
+/// parentesi dentro le stringhe) e legge la PRIMA call → (name, args). train==runtime.
+fn extract_tool_call_mistral(raw: &str) -> Option<(String, Value)> {
+    let i = raw.find("[TOOL_CALLS]")?;
+    let after = raw[i + "[TOOL_CALLS]".len()..].trim_start();
+    let arr = first_json_array(after)?;
+    let v: Value = serde_json::from_str(&arr).ok()?;
+    let first = v.as_array()?.first()?;
+    let name = first.get("name")?.as_str()?.to_string();
+    let args = first.get("arguments").cloned().unwrap_or_else(|| serde_json::json!({}));
+    Some((name, args))
+}
+
+/// Primo array `[…]` bilanciato in `s` (gemello di `first_json_object`, ignora `[`/`]` dentro le stringhe).
+fn first_json_array(s: &str) -> Option<String> {
+    if !s.starts_with('[') {
+        return None;
+    }
+    let (mut depth, mut in_str, mut esc) = (0i32, false, false);
+    for (i, c) in s.char_indices() {
+        if in_str {
+            if esc { esc = false } else if c == '\\' { esc = true } else if c == '"' { in_str = false }
+            continue;
+        }
+        match c {
+            '"' => in_str = true,
+            '[' => depth += 1,
+            ']' => { depth -= 1; if depth == 0 { return Some(s[..=i].to_string()); } }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Qwen/ChatML: `<tool_call>{"name": "...", "arguments": {...}}`.
@@ -168,9 +205,13 @@ fn parse_gemma_value(v: &str) -> Value {
 
 pub(super) fn strip_markers(s: &str) -> String {
     let mut t = strip_channel_thinking(s);
-    // fine turno: Qwen <|im_end|>, Gemma <turn|> — mai leakarli nella risposta
-    // never leak a tool-call block either: Qwen `<tool_call`, Gemma `<|tool_call`
-    for marker in ["<|im_end|>", "<turn|>", "<|tool_call", "<tool_call"] {
+    // fine turno per dialetto (EOS atomici): Qwen <|im_end|>, Gemma nativo <end_of_turn> (+ vecchio
+    // <turn|> difensivo), Mistral </s>, Cohere <|END_OF_TURN_TOKEN|>. E mai leakare un blocco tool-call:
+    // Qwen `<tool_call`, Gemma `<|tool_call`, Mistral `[TOOL_CALLS`. Tronca alla PRIMA occorrenza.
+    for marker in [
+        "<|im_end|>", "<end_of_turn>", "<turn|>", "</s>", "<|END_OF_TURN_TOKEN|>",
+        "<|tool_call", "<tool_call", "[TOOL_CALLS",
+    ] {
         if let Some(i) = t.find(marker) {
             t.truncate(i);
         }
@@ -201,7 +242,7 @@ pub(super) fn strip_channel_thinking(s: &str) -> String {
 /// it becomes a tool call. Returns the LONGEST partial match across both markers.
 pub(super) fn toolcall_prefix_tail(s: &str) -> usize {
     let mut best = 0;
-    for marker in ["<|tool_call", "<tool_call"] {
+    for marker in ["<|tool_call", "<tool_call", "[TOOL_CALLS"] {
         let max = marker.len().min(s.len());
         for i in (1..=max).rev() {
             if s.ends_with(&marker[..i]) {
@@ -316,6 +357,39 @@ mod tests {
         let (name, args) = extract_tool_call(raw).expect("gemma tool call");
         assert_eq!(name, "note");
         assert_eq!(args.get("text").unwrap(), "caffè però àèìòù");
+    }
+
+    // ── Mistral tool-call nativo [TOOL_CALLS][{…}] ──────────────────────────────────────────
+    #[test]
+    fn extracts_mistral_tool_call() {
+        let raw = "[TOOL_CALLS][{\"name\": \"weather\", \"arguments\": {\"location\": \"Modena\"}}]";
+        let (name, args) = extract_tool_call(raw).expect("mistral tool call");
+        assert_eq!(name, "weather");
+        assert_eq!(args.get("location").unwrap(), "Modena");
+    }
+
+    #[test]
+    fn extracts_mistral_tool_call_after_prose_and_before_eos() {
+        // preambolo + il ] chiuso, poi </s> (che il generatore stoppa) — legge la PRIMA call
+        let raw = "Controllo.[TOOL_CALLS][{\"name\":\"datetime\",\"arguments\":{}}, {\"name\":\"x\",\"arguments\":{}}]</s>";
+        let (name, _) = extract_tool_call(raw).expect("mistral tool call");
+        assert_eq!(name, "datetime");
+    }
+
+    #[test]
+    fn mistral_bracket_in_string_non_spezza_array() {
+        let raw = "[TOOL_CALLS][{\"name\":\"note\",\"arguments\":{\"text\":\"lista] con ]\"}}]";
+        let (name, args) = extract_tool_call(raw).expect("mistral tool call");
+        assert_eq!(name, "note");
+        assert_eq!(args.get("text").unwrap(), "lista] con ]");
+    }
+
+    #[test]
+    fn strip_markers_mistral_e_cohere_eos() {
+        assert_eq!(strip_markers("risposta</s>"), "risposta");
+        assert_eq!(strip_markers("ciao<|END_OF_TURN_TOKEN|>"), "ciao");
+        assert_eq!(strip_markers("ecco [TOOL_CALLS][{}]"), "ecco");
+        assert_eq!(strip_markers("gemma nativo<end_of_turn>"), "gemma nativo");
     }
 
     #[test]

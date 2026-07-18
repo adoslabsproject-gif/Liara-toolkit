@@ -8,7 +8,7 @@
 //!
 //! Il detector meccanico (loop/runaway/encoding/inglese) e la lettura a mano stanno in
 //! `eval/fluency_eval_runner.py::score` — questo bin PRODUCE solo le risposte reali.
-use app_lib::core::agent::{format_chat, render_full, Message, SYSTEM_PROMPT};
+use app_lib::core::agent::{format_chat, render_full, Dialect, Message, SYSTEM_PROMPT};
 use app_lib::core::engine::{Engine, GenOptions, LlamaEngine};
 use std::io::Write;
 use std::sync::atomic::AtomicBool;
@@ -45,20 +45,25 @@ fn main() -> anyhow::Result<()> {
         // BitNet-2B-4T ha il SUO template («Role: content<|eot_id|>» + «Assistant: »), NON chatml:
         // costruirlo a mano è l'unico modo per un test FEDELE (l'app non ha ancora un ramo BitNet in
         // format_chat). Qwen/Gemma restano su format_chat.
+        // Dialetto REALE dal motore (stessa detection del runtime) → train==runtime anche nell'eval.
+        let dialect = eng.dialect();
         let full = if bitnet {
             format!("System: {SYSTEM_PROMPT}<|eot_id|>User: {prompt}<|eot_id|>Assistant: ")
         } else {
-            format_chat(SYSTEM_PROMPT, &msgs, thinking, gemma)
+            format_chat(SYSTEM_PROMPT, &msgs, thinking, dialect)
         };
         let opts = GenOptions {
             max_tokens: 1024,
             temperature: 0.7,
             stop: if bitnet {
                 vec!["<|eot_id|>".into()]
-            } else if gemma {
-                vec!["<tool_call|>".into(), "</tool_call>".into(), "<turn|>".into()]
             } else {
-                vec!["</tool_call>".into(), "<|im_end|>".into()]
+                match dialect {
+                    Dialect::Qwen => vec!["</tool_call>".into(), "<|im_end|>".into()],
+                    Dialect::Gemma => vec!["<tool_call|>".into(), "</tool_call>".into(), "<end_of_turn>".into()],
+                    Dialect::Mistral => vec!["</s>".into()],
+                    Dialect::Cohere => vec!["<|END_OF_TURN_TOKEN|>".into()],
+                }
             },
             ..Default::default()
         };

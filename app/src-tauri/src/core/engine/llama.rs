@@ -169,8 +169,12 @@ impl LlamaEngine {
         // Gemma nativo), così il trim overflow snappa ai confini-messaggio a prescindere dal modello.
         // Solo i marker che tokenizzano a UN token speciale sono usabili per lo snap.
         let one_tok = |s: &str| model.str_to_token(s, AddBos::Never).ok().filter(|v| v.len() == 1).map(|v| v[0]);
-        let turn_starts: Vec<LlamaToken> = ["<|im_start|>", "<start_of_turn>"].iter().filter_map(|s| one_tok(s)).collect();
-        let turn_ends: Vec<LlamaToken> = ["<|im_end|>", "<end_of_turn>"].iter().filter_map(|s| one_tok(s)).collect();
+        // per-dialetto: ChatML, Gemma nativo, Mistral ([INST]/</s>), Cohere. `one_tok` tiene SOLO i
+        // marker che sono UN token per QUESTO modello → gli altri (non nel vocab) sono scartati, safe.
+        let turn_starts: Vec<LlamaToken> = ["<|im_start|>", "<start_of_turn>", "[INST]", "<|START_OF_TURN_TOKEN|>"]
+            .iter().filter_map(|s| one_tok(s)).collect();
+        let turn_ends: Vec<LlamaToken> = ["<|im_end|>", "<end_of_turn>", "</s>", "<|END_OF_TURN_TOKEN|>"]
+            .iter().filter_map(|s| one_tok(s)).collect();
         // mmproj: verifichiamo SOLO che esista (fail-fast), ma NON lo carichiamo qui — il proiettore
         // (~1.2GB) si carica alla prima immagine (lazy in describe) per non andare OOM all'avvio.
         if let Some(mm) = mmproj {
@@ -462,6 +466,22 @@ impl Engine for LlamaEngine {
     fn is_gemma(&self) -> bool {
         self.id.to_lowercase().contains("gemma")
     }
+    /// Dialetto dal nome file del GGUF (il catalogo `dialect` è la fonte a monte; qui il segnale
+    /// robusto per l'engine). gemma→Gemma · mistral/nemo/ministral/velvet→Mistral ·
+    /// aya/command-r/cohere→Cohere · resto (qwen, lfm2, hermes)→Qwen/ChatML.
+    fn dialect(&self) -> crate::core::agent::Dialect {
+        use crate::core::agent::Dialect;
+        let id = self.id.to_lowercase();
+        if id.contains("gemma") {
+            Dialect::Gemma
+        } else if id.contains("mistral") || id.contains("nemo") || id.contains("ministral") || id.contains("velvet") {
+            Dialect::Mistral
+        } else if id.contains("aya") || id.contains("command-r") || id.contains("commandr") || id.contains("cohere") {
+            Dialect::Cohere
+        } else {
+            Dialect::Qwen
+        }
+    }
 
     /// Descrive un'immagine usando lo STESSO modello (VL) — niente secondo motore, niente swap.
     fn describe(
@@ -510,10 +530,10 @@ impl Engine for LlamaEngine {
 
         let q = if prompt.trim().is_empty() { "Descrivi dettagliatamente questa immagine." } else { prompt };
         let marker = mtmd_default_marker();
-        // Template del VL: Gemma 4 usa <|turn>/<turn|>; Qwen2.5-VL usa <|im_start|>.
+        // Template del VL: Gemma NATIVO <start_of_turn>/<end_of_turn>; Qwen2.5-VL usa <|im_start|>.
         // Col template sbagliato il modello riceve un prompt malformato → descrizione degradata.
         let text = if self.id.to_lowercase().contains("gemma") {
-            format!("<|turn>user\n{marker}{q}<turn|>\n<|turn>model\n")
+            format!("<bos><start_of_turn>user\n{marker}{q}<end_of_turn>\n<start_of_turn>model\n")
         } else {
             format!(
                 "<|im_start|>system\nSei Liara, un'assistente attenta. Rispondi in italiano.<|im_end|>\n\

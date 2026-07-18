@@ -1,5 +1,5 @@
 //! The ReAct tool loop: the model thinks, calls tools, observes, and answers.
-use super::format::{format_chat, Message};
+use super::format::{format_chat, Dialect, Message};
 use super::parse::{extract_tool_call, strip_markers};
 use super::stream::StreamRouter;
 use crate::core::engine::{Engine, GenOptions};
@@ -28,25 +28,49 @@ fn forced_call(name: &str, args: serde_json::Value) -> String {
     format!("<tool_call>\n{call}\n</tool_call>")
 }
 
-/// Il risultato di un tool iniettato nel prompt. Qwen: `<tool_response>…</tool_response>`.
-/// Gemma: testo neutro — Gemma imiterebbe il marker ChatML e lo leakerebbe nella risposta.
-fn tool_resp(result: &str, gemma: bool) -> String {
-    if gemma {
-        format!("Risultato dello strumento:\n{result}")
-    } else {
-        format!("<tool_response>\n{result}\n</tool_response>")
+/// Il risultato di un tool iniettato nel prompt, nel formato NATIVO del dialetto. Qwen:
+/// `<tool_response>…`. Mistral: `[TOOL_RESULTS]…[/TOOL_RESULTS]`. Gemma/Cohere: testo neutro —
+/// imiterebbero un marker estraneo e lo leakerebbero nella risposta.
+fn tool_resp(result: &str, dialect: Dialect) -> String {
+    match dialect {
+        Dialect::Qwen => format!("<tool_response>\n{result}\n</tool_response>"),
+        Dialect::Mistral => format!("[TOOL_RESULTS]{result}[/TOOL_RESULTS]"),
+        Dialect::Gemma | Dialect::Cohere => format!("Risultato dello strumento:\n{result}"),
     }
 }
 
-/// Come registrare nel contesto (turno assistant) il tool-call appena emesso. Qwen: il blocco nativo
-/// `<tool_call>{…}`. Gemma: una nota in linguaggio naturale — se rivedesse un blocco ChatML/Qwen nel
-/// PROPRIO turno lo imiterebbe, tornando a leakare i marker; la frase gli dà lo stesso grounding
-/// (nome + argomenti) senza inquinare il dialetto Gemma.
-fn assistant_toolcall(name: &str, args: &serde_json::Value, gemma: bool) -> String {
-    if gemma {
-        format!("Ho usato lo strumento {name} con argomenti {args}.")
-    } else {
-        format!("<tool_call>\n{{\"name\": \"{name}\", \"arguments\": {args}}}\n</tool_call>")
+/// Come registrare nel contesto (turno assistant) il tool-call appena emesso, nel formato che QUEL
+/// modello emette davvero (train==runtime). Qwen: `<tool_call>{…}`. Mistral: `[TOOL_CALLS][{…}]`.
+/// Gemma/Cohere: una nota in linguaggio naturale — se rivedessero un blocco di un altro dialetto nel
+/// PROPRIO turno lo imiterebbero, tornando a leakare i marker; la frase dà lo stesso grounding.
+fn assistant_toolcall(name: &str, args: &serde_json::Value, dialect: Dialect) -> String {
+    match dialect {
+        Dialect::Qwen => format!("<tool_call>\n{{\"name\": \"{name}\", \"arguments\": {args}}}\n</tool_call>"),
+        Dialect::Mistral => format!("[TOOL_CALLS][{{\"name\": \"{name}\", \"arguments\": {args}}}]"),
+        Dialect::Gemma | Dialect::Cohere => format!("Ho usato lo strumento {name} con argomenti {args}."),
+    }
+}
+
+/// Stop di generazione durante il loop tool: l'EOS ATOMICO del dialetto + il chiusura del blocco
+/// tool-call (dove esiste come marker), così la generazione si ferma subito dopo la chiamata.
+fn gen_stops(dialect: Dialect) -> Vec<String> {
+    match dialect {
+        Dialect::Qwen => vec!["</tool_call>".into(), "<|im_end|>".into()],
+        // `<turn|>` è il vecchio marker Gemma: lasciato come stop DIFENSIVO finché i Gemma non sono
+        // ri-allenati sul nativo, così un modello vecchio almeno termina (non papiro) nella transizione.
+        Dialect::Gemma => vec!["<tool_call|>".into(), "</tool_call>".into(), "<end_of_turn>".into(), "<turn|>".into()],
+        Dialect::Mistral => vec!["</s>".into()],
+        Dialect::Cohere => vec!["<|END_OF_TURN_TOKEN|>".into()],
+    }
+}
+
+/// Stop per la risposta FINALE: solo l'EOS atomico del dialetto (niente tool → niente chiusure tool-call).
+fn final_stops(dialect: Dialect) -> Vec<String> {
+    match dialect {
+        Dialect::Qwen => vec!["<|im_end|>".into()],
+        Dialect::Gemma => vec!["<end_of_turn>".into(), "<turn|>".into()], // <turn|> difensivo (transizione)
+        Dialect::Mistral => vec!["</s>".into()],
+        Dialect::Cohere => vec!["<|END_OF_TURN_TOKEN|>".into()],
     }
 }
 
@@ -80,7 +104,7 @@ pub fn run_agent(
 ) -> anyhow::Result<String> {
     let mut convo: Vec<Message> = messages.to_vec();
     // Gemma parla un dialetto diverso da Qwen (formato prompt + token di stop). Lo determiniamo UNA volta.
-    let gemma = engine.is_gemma();
+    let dialect = engine.dialect();
     // the user's latest request: drives tool routing + the selection guard
     let user_request: String = messages
         .iter()
@@ -140,7 +164,9 @@ pub fn run_agent(
     // pochi strumenti pertinenti (stesso set del prompt, stessa `routing_window`). Un nome inventato
     // o fuori-contesto è impossibile da emettere → il crollo degli errori di tool-calling. È la
     // singola leva con più resa, tutta a costo-zero di training.
-    let grammar = (!registry.is_empty() && !gemma && gbnf_on)
+    // GBNF SOLO per ChatML/Qwen: Gemma/Mistral/Cohere emettono il loro tool-call nativo (non
+    // `<tool_call>` su cui la grammar è ancorata) e si affidano al training + all'EOS atomico.
+    let grammar = (!registry.is_empty() && dialect == Dialect::Qwen && gbnf_on)
         .then(|| registry.tool_call_grammar_for(&routing_window));
 
     for _ in 0..5 {
@@ -172,7 +198,7 @@ pub fn run_agent(
             };
             raw = forced_call("weather", args);
         } else {
-            let prompt = format_chat(&system, &convo, thinking, gemma);
+            let prompt = format_chat(&system, &convo, thinking, dialect);
             let opts = GenOptions {
                 // #2 FIX: budget più ampio (era 700) così, col reasoning ON, il <think> non affama la
                 // risposta. Il papiro-loop è già contenuto dalla repeat/frequency penalty (llama.rs
@@ -182,13 +208,7 @@ pub fn run_agent(
                 // (preset Breve/Media/Lunga/Massima, con max per-dispositivo) → passato da generate().
                 max_tokens,
                 temperature,
-                stop: if gemma {
-                    // Gemma chiude il tool-call nativo con `<tool_call|>`; il turno con `<turn|>`.
-                    // (`</tool_call>` resta per il caso tool-forcing, che inietta il blocco Qwen.)
-                    vec!["<tool_call|>".into(), "</tool_call>".into(), "<turn|>".into()]
-                } else {
-                    vec!["</tool_call>".into(), "<|im_end|>".into()]
-                },
+                stop: gen_stops(dialect),
                 grammar: grammar.clone(),
                 ..Default::default()
             };
@@ -230,11 +250,11 @@ pub fn run_agent(
                     sink.on_tool_result(&name, &result);
                     convo.push(Message {
                         role: "assistant".into(),
-                        content: assistant_toolcall(&name, &args, gemma),
+                        content: assistant_toolcall(&name, &args, dialect),
                     });
                     convo.push(Message {
                         role: "user".into(),
-                        content: tool_resp(&result, gemma),
+                        content: tool_resp(&result, dialect),
                     });
                     continue;
                 }
@@ -246,22 +266,22 @@ pub fn run_agent(
             sink.on_tool_result(&name, &result);
             convo.push(Message {
                 role: "assistant".into(),
-                content: assistant_toolcall(&name, &args, gemma),
+                content: assistant_toolcall(&name, &args, dialect),
             });
             convo.push(Message {
                 role: "user".into(),
-                content: tool_resp(&result, gemma),
+                content: tool_resp(&result, dialect),
             });
             continue;
         }
         return Ok(strip_markers(&raw));
     }
     // out of tool steps: force a plain answer (no tools, no technical message)
-    let prompt = format_chat(base_system, &convo, thinking, gemma);
+    let prompt = format_chat(base_system, &convo, thinking, dialect);
     let opts = GenOptions {
         max_tokens: 400,
         temperature,
-        stop: if gemma { vec!["<turn|>".into()] } else { vec!["<|im_end|>".into()] },
+        stop: final_stops(dialect),
         ..Default::default()
     };
     let mut out = String::new();
