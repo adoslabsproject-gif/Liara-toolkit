@@ -50,6 +50,9 @@ export function LoadOverlays({ md, initializing, settling, status, onUseCloud }:
           <div className="load-title">✅ {md.switchTo} {t("pronto", "ready")}</div>
           <div className="load-sub">{t("Per usare questo modello, riavvia Liara — così memoria e GPU ripartono pulite.", "To use this model, restart Liara — so memory and GPU start fresh.")}</div>
           <button className="dl-btn" onClick={() => invoke("exit_app")}>{t("Chiudi Liara ora", "Close Liara now")}</button>
+          {/* ANNULLA (cambio idea): chiude l'overlay senza chiudere l'app. Il modello scelto è già
+              salvato → si applica al prossimo riavvio naturale; la sessione attuale continua com'è. */}
+          <button className="dl-btn" style={{ background: "transparent", border: "1px solid var(--line)", color: "var(--txt)" }} onClick={() => md.setSwitchTo(null)}>{t("Annulla", "Cancel")}</button>
           <div className="load-hint">{t("Poi riaprila dall'icona: caricherà il modello scelto.", "Then reopen it from the icon: it'll load the chosen model.")}</div>
         </div>
       )}

@@ -172,12 +172,13 @@ export default function App() {
   // Consenso cloud: modale IN-APP (window.confirm NON funziona nella WebView di Tauri → ritornava
   // sempre false, il cloud restava OFF). Attivandola i dati escono dal dispositivo. Unico per menu+selettore.
   const [cloudAsk, setCloudAsk] = useState(false);
-  const toggleCloud = (on: boolean) => {
+  const toggleCloud = (on: boolean, silent = false) => {
     if (!on) {
-      // Spegni il cloud → torna al modello locale. RIAVVIO (come il cambio modello): così l'engine
-      // locale riparte pulito e non resta "bloccato" lo stato precedente. La modalità è in localStorage.
+      // Spegni il cloud → torna al modello locale. `silent` = spegnimento SENZA overlay di riavvio
+      // (usato quando si sceglie un modello da scaricare dal cloud: lì il warmup carica in-place e non
+      // va chiusa l'app). Altrimenti mostra l'overlay "riavvia per applicare". Modalità in localStorage.
       setCloudMode(false);
-      md.setSwitchTo(t("Modello locale", "Local model"));
+      if (!silent) md.setSwitchTo(t("Modello locale", "Local model"));
       haptic(20);
       return;
     }

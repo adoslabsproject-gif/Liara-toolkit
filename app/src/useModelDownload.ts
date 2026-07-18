@@ -96,19 +96,32 @@ export function useModelDownload(isAndroid: boolean, initializing: boolean, setI
     }
   };
 
-  // Cambia modello dal selettore: se presente → riavvia per usarlo; se manca → scarica (con retry) e riavvia.
-  const chooseModel = async (m: Model) => {
+  // Cambia modello dal selettore. `cloud`/`onCloudOff`: se veniamo dal CLOUD non c'è alcun engine
+  // locale in RAM → NIENTE riavvio (che chiuderebbe l'app interrompendo il download!): carichiamo
+  // in-place col warmup. Il riavvio serve SOLO per lo switch fra due modelli LOCALI (libera la GPU
+  // del vecchio). Bug owner: da cloud, scaricare un modello chiudeva l'app e il download andava perso.
+  const chooseModel = async (m: Model, cloud = false, onCloudOff?: () => void) => {
     const present = await invoke<boolean>("model_present", { filename: m.file }).catch(() => false);
     // Gemma (mmprojNative): la VISTA è in un file SEPARATO. Se il modello c'è ma il mmproj no, Gemma
     // parte "senza occhi" → verifichiamo ENTRAMBI così un modello scaricato prima del fix recupera il mmproj.
     const mm = m.mmprojNative;
     const mmMissing = !!mm && !(await invoke<boolean>("model_present", { filename: mm.file }).catch(() => false));
-    if (!present || mmMissing) { startDownload(m, true); return; }
-    if (m.id === modelId) return;
+    if (!present || mmMissing) {
+      if (cloud) onCloudOff?.();        // spegni il cloud in SILENZIO (nessun overlay di riavvio)
+      startDownload(m, /* restart */ !cloud); // da cloud: warmup dopo il download; fra locali: riavvio
+      return;
+    }
+    if (m.id === modelId && !cloud) return;
     await invoke("set_active_model", { filename: m.file }).catch(() => {});
     try { localStorage.setItem("liara_model", m.id); } catch { /* */ }
     setModelId(m.id); setLang(m.lang as "it" | "en"); // l'interfaccia segue la lingua scelta
-    setSwitchTo(m.size); // overlay "riavvia per applicare" invece di chiudere a sorpresa
+    if (cloud) {
+      // da cloud → carico il modello locale IN-PLACE (nessun engine vecchio da liberare, niente app-close)
+      onCloudOff?.();
+      setNeedDownload(false); setInitializing(true); invoke("warmup").catch(() => {});
+    } else {
+      setSwitchTo(m.size); // switch fra locali: overlay "riavvia per applicare" (libera GPU del vecchio)
+    }
   };
 
   // Elimina i file di un modello SCARICATO (GGUF + eventuale mmproj nativo Gemma) per liberare spazio.
