@@ -369,6 +369,17 @@ mod tests {
     }
 
     #[test]
+    fn extracts_mistral_tool_call_wire_format_con_spazio() {
+        // Forma REALE emessa dal modello addestrato sul template mistral-common: SPAZIO dopo
+        // [TOOL_CALLS] (`[TOOL_CALLS] [{…}]`) + </s> finale. `trim_start()` lo gestisce →
+        // train==runtime con la resa di `agent_loop::assistant_toolcall`.
+        let raw = "[TOOL_CALLS] [{\"name\": \"weather\", \"arguments\": {\"location\": \"Modena\"}}]</s>";
+        let (name, args) = extract_tool_call(raw).expect("mistral tool call con spazio");
+        assert_eq!(name, "weather");
+        assert_eq!(args.get("location").unwrap(), "Modena");
+    }
+
+    #[test]
     fn extracts_mistral_tool_call_after_prose_and_before_eos() {
         // preambolo + il ] chiuso, poi </s> (che il generatore stoppa) — legge la PRIMA call
         let raw = "Controllo.[TOOL_CALLS][{\"name\":\"datetime\",\"arguments\":{}}, {\"name\":\"x\",\"arguments\":{}}]</s>";

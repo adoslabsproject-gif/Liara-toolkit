@@ -20,10 +20,10 @@ export function ModelDrawer({ md, cloud, onCloud, onBack }: { md: ModelDownloadA
           </div>
         )}
         {md.dlErr && <div className="load-hint" style={{ color: "#e88", margin: "0 4px 8px" }}>⚠️ {md.dlErr}</div>}
-        {/* Modalità cloud: il 32B via API (nessun download). Attivarla = i dati escono dal dispositivo (consenso). */}
+        {/* Modalità cloud: il 24B via API (nessun download). Attivarla = i dati escono dal dispositivo (consenso). */}
         <button className={`menurow ${cloud ? "active" : ""}`} onClick={() => onCloud(!cloud)}>
           <span className="menuico">☁️ ✨</span>
-          <span className="menuname">{t("Liara Cloud (32B)", "Liara Cloud (32B)")}<br /><small style={{ color: "var(--mut)" }}>{t("Il più capace · via internet · niente da scaricare. I dati escono dal dispositivo.", "The most capable · over the internet · nothing to download. Data leaves the device.")}</small></span>
+          <span className="menuname">{t("Liara Cloud (24B)", "Liara Cloud (24B)")}<br /><small style={{ color: "var(--mut)" }}>{t("Il più capace · via internet · niente da scaricare. I dati escono dal dispositivo.", "The most capable · over the internet · nothing to download. Data leaves the device.")}</small></span>
           <span className="menutag">{cloud ? t("IN USO", "IN USE") : t("☁️ Attiva", "☁️ Enable")}</span>
         </button>
         {md.visibleModels.map((m) => (

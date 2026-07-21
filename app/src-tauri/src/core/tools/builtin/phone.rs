@@ -2,30 +2,48 @@
 //! Intent Android). Nessun permesso pericoloso, nessun invio silenzioso: l'utente conferma nell'app
 //! telefono/SMS. Su desktop questi tool non sono operativi (rispondono con una nota).
 //!
-//! ⚠️ CONTRATTO congelato per il dataset (come i peer): nomi/argomenti stabili. Entrambi SENSIBILI
-//! → consenso prima di agire.
+//! Il parametro `number` accetta anche un NOME: "chiama Marco" si risolve contro la rubrica cifrata
+//! di Liara (0 = non trovato → si chiede; 1 = si usa; >1 = omonimia → si elencano e si chiede quale).
+//!
+//! ⚠️ CONTRATTO congelato per il dataset (come i peer): nomi/argomenti stabili (`number` ora accetta
+//! anche il nome: retro-compatibile, i numeri passano invariati). Entrambi SENSIBILI → consenso.
+use super::contacts_tools::{ambiguous_message, not_found_message, resolve_target, Resolved};
+use crate::core::contacts::Contacts;
 use crate::core::tools::{Tool, ToolSpec};
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
+use std::sync::Arc;
 
 fn arg_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
     args.get(key).and_then(|v| v.as_str()).map(|s| s.trim()).filter(|s| !s.is_empty())
         .ok_or_else(|| anyhow!("manca '{key}'"))
 }
 
+/// "Marco Rossi (3330000001)" se risolto da rubrica, altrimenti il numero nudo.
+#[cfg(target_os = "android")]
+fn display(number: &str, name: &Option<String>) -> String {
+    match name {
+        Some(n) => format!("{n} ({number})"),
+        None => number.to_string(),
+    }
+}
+
 /// Avvia il dialer col numero già inserito (ACTION_DIAL). L'utente preme "chiama" nell'app telefono.
-pub struct PhoneCall;
+pub struct PhoneCall {
+    pub contacts: Arc<Contacts>,
+}
 impl Tool for PhoneCall {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "phone_call".into(),
             description: "Apre l'app telefono con un numero già composto, pronto da chiamare. Usalo quando \
-l'utente vuole chiamare qualcuno: prepari la chiamata e passi il controllo all'app telefono (l'utente conferma)."
+l'utente vuole chiamare qualcuno: prepari la chiamata e passi il controllo all'app telefono (l'utente conferma). \
+Accetta anche il nome di un contatto della rubrica."
                 .into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "number": { "type": "string", "description": "Numero di telefono da comporre (con prefisso se serve)" }
+                    "number": { "type": "string", "description": "Numero da comporre (con prefisso se serve) o nome del contatto in rubrica" }
                 },
                 "required": ["number"]
             }),
@@ -36,33 +54,44 @@ l'utente vuole chiamare qualcuno: prepari la chiamata e passi il controllo all'a
         format!("aprire il telefono per chiamare {}", arg_str(args, "number").unwrap_or("?"))
     }
     fn execute(&self, args: &Value) -> Result<String> {
-        let number = arg_str(args, "number")?;
+        let target = arg_str(args, "number")?;
+        let (number, name) = match resolve_target(&self.contacts, target)? {
+            Resolved::NotFound(n) => return Ok(not_found_message(&n)),
+            Resolved::Ambiguous(hits) => return Ok(ambiguous_message(target, &hits)),
+            Resolved::Number { number, name } => (number, name),
+        };
         #[cfg(target_os = "android")]
         {
-            android::dial(number)?;
-            Ok(format!("Ho aperto l'app telefono con il numero {number}: premi chiama per avviare la chiamata."))
+            android::dial(&number)?;
+            Ok(format!(
+                "Ho aperto l'app telefono per chiamare {}: premi chiama per avviare la chiamata.",
+                display(&number, &name)
+            ))
         }
         #[cfg(not(target_os = "android"))]
         {
-            let _ = number;
+            let _ = (number, name);
             Ok("Le chiamate sono disponibili solo sull'app Android di Liara.".into())
         }
     }
 }
 
 /// Apre l'app SMS con destinatario e testo già compilati (ACTION_SENDTO). L'utente preme "invia".
-pub struct SmsSend;
+pub struct SmsSend {
+    pub contacts: Arc<Contacts>,
+}
 impl Tool for SmsSend {
     fn spec(&self) -> ToolSpec {
         ToolSpec {
             name: "sms_send".into(),
             description: "Apre l'app SMS con destinatario e messaggio già scritti, pronti da inviare. Usalo \
-quando l'utente vuole mandare un SMS: prepari il messaggio e passi il controllo all'app (l'utente conferma l'invio)."
+quando l'utente vuole mandare un SMS: prepari il messaggio e passi il controllo all'app (l'utente conferma l'invio). \
+Accetta anche il nome di un contatto della rubrica."
                 .into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "number": { "type": "string", "description": "Numero del destinatario" },
+                    "number": { "type": "string", "description": "Numero del destinatario o nome del contatto in rubrica" },
                     "text": { "type": "string", "description": "Testo del messaggio" }
                 },
                 "required": ["number", "text"]
@@ -74,16 +103,24 @@ quando l'utente vuole mandare un SMS: prepari il messaggio e passi il controllo 
         format!("aprire l'app SMS per scrivere a {}", arg_str(args, "number").unwrap_or("?"))
     }
     fn execute(&self, args: &Value) -> Result<String> {
-        let number = arg_str(args, "number")?;
+        let target = arg_str(args, "number")?;
         let text = arg_str(args, "text")?;
+        let (number, name) = match resolve_target(&self.contacts, target)? {
+            Resolved::NotFound(n) => return Ok(not_found_message(&n)),
+            Resolved::Ambiguous(hits) => return Ok(ambiguous_message(target, &hits)),
+            Resolved::Number { number, name } => (number, name),
+        };
         #[cfg(target_os = "android")]
         {
-            android::sms(number, text)?;
-            Ok(format!("Ho aperto l'app SMS con il messaggio per {number}: premi invia per spedirlo."))
+            android::sms(&number, text)?;
+            Ok(format!(
+                "Ho aperto l'app SMS con il messaggio per {}: premi invia per spedirlo.",
+                display(&number, &name)
+            ))
         }
         #[cfg(not(target_os = "android"))]
         {
-            let _ = (number, text);
+            let _ = (number, name, text);
             Ok("L'invio di SMS è disponibile solo sull'app Android di Liara.".into())
         }
     }

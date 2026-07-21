@@ -16,9 +16,11 @@ fn registry() -> ToolRegistry {
     let crypto = Arc::new(Crypto::from_key(&[1u8; 32]));
     let mem = Arc::new(Memory::open(":memory:", crypto.clone()).unwrap());
     let email = Arc::new(EmailStore::open(":memory:", crypto.clone()).unwrap());
-    let cal = Arc::new(Calendar::open(":memory:", crypto).unwrap());
+    let cal = Arc::new(Calendar::open(":memory:", crypto.clone()).unwrap());
+    let contacts = Arc::new(crate::core::contacts::Contacts::open(":memory:", crypto.clone()).unwrap());
+    let sms = Arc::new(crate::core::sms::SmsStore::open(":memory:", crypto).unwrap());
     let pending = Arc::new(Mutex::new(None));
-    ToolRegistry::build(email, pending, cal, mem)
+    ToolRegistry::build(email, pending, cal, mem, contacts, sms)
 }
 
 /// Memory eval: recall precision + supersession correctness (synthetic embeddings).

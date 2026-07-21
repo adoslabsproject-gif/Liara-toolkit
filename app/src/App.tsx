@@ -16,6 +16,10 @@ import { ProfileDrawer } from "./ProfileDrawer";
 import { useModelDownload } from "./useModelDownload";
 import { useAgenda } from "./useAgenda";
 import { AgendaDrawer } from "./AgendaDrawer";
+import { useContacts } from "./useContacts";
+import { ContactsDrawer } from "./ContactsDrawer";
+import { useSms } from "./useSms";
+import { SmsDrawer } from "./SmsDrawer";
 import { LoadOverlays } from "./LoadOverlays";
 import { ModelDrawer } from "./ModelDrawer";
 import { ConsentModal } from "./ConsentModal";
@@ -78,7 +82,7 @@ export default function App() {
     haptic(20);
   };
   // Lunghezza risposte (preset per-dispositivo): il budget max_tokens dipende da DOVE gira il cervello —
-  // cloud 32B generoso (contesto ~40k), desktop medio (~8k), mobile conservativo (piccolo, anti-papiro/OOM).
+  // cloud 24B generoso (contesto ~40k), desktop medio (~8k), mobile conservativo (piccolo, anti-papiro/OOM).
   const [respLen, setRespLen] = useState<"breve" | "media" | "lunga" | "massima">(() => {
     try { return (localStorage.getItem("liara_resp_len") as "breve" | "media" | "lunga" | "massima") || "media"; } catch { return "media"; }
   });
@@ -122,7 +126,7 @@ export default function App() {
   // device col vecchio _v2="0" ripartono dal nuovo default ON. Chi lo vuole spento lo toggla dal menu.
   const [thinking, setThinking] = useState(() => { try { const v = localStorage.getItem("liara_thinking_v3"); return v === null ? true : v === "1"; } catch { return true; } });
   useEffect(() => { invoke("set_thinking", { on: thinking }).catch(() => {}); try { localStorage.setItem("liara_thinking_v3", thinking ? "1" : "0"); } catch {} }, [thinking]);
-  // Modalità cloud: i turni vanno al 32B (Qwen3-VL) via API invece che al modello locale. I tool si
+  // Modalità cloud: i turni vanno al 24B (Qwen3-VL) via API invece che al modello locale. I tool si
   // eseguono comunque IN LOCALE (memoria/sensori/file on-device). ⚠️ i dati escono dal dispositivo →
   // si attiva solo dopo consenso esplicito. OFF di default (Liara è on-device). Vedi commands/remote.rs.
   const [cloudMode, setCloudMode] = useState(() => { try { return localStorage.getItem("liara_cloud") === "1"; } catch { return false; } });
@@ -154,7 +158,7 @@ export default function App() {
     if (cloudMode && (md.needDownload || initializing)) { md.setNeedDownload(false); setInitializing(false); }
   }, [cloudMode, md.needDownload, initializing]);
   // Saluto di stato dal server cloud (GET /v1/hello via backend cloud_hello): mostra un messaggio come
-  // PRIMO turno SOLO se il server lo abilita (__liara_hello) — es. avviso che il 32B è temporaneamente
+  // PRIMO turno SOLO se il server lo abilita (__liara_hello) — es. avviso che il 24B è temporaneamente
   // sostituito (dataset) o è tornato. Parte SOLO in modalità cloud (in locale NON si contatta il server:
   // promessa on-device) e SOLO su chat vuota (non sovrascrive una conversazione). Ogni errore/timeout →
   // nessun messaggio (fail-safe). Vedi commands/remote.rs::cloud_hello.
@@ -219,6 +223,8 @@ export default function App() {
   const [theme, setTheme] = useState(() => localStorage.getItem("liara_theme") || "");
   const [showTheme, setShowTheme] = useState(false);
   const agenda = useAgenda(); // agenda/calendario (useAgenda.ts)
+  const contacts = useContacts(); // rubrica cifrata + sincronizzazione dal telefono (useContacts.ts)
+  const sms = useSms(); // SMS: copia locale cifrata, menù separato (useSms.ts)
   const email = useEmail(); // sottosistema email: stato + handler + polling (useEmail.ts)
   const streamTarget = useRef<string>("");
   const stoppedRef = useRef(false); // true dopo Stop → ignora i token ancora in arrivo (stop immediato a schermo)
@@ -355,6 +361,8 @@ export default function App() {
     prof.showProfile && (() => prof.setShowProfile(false)),
     showChats && (() => setShowChats(false)),
     agenda.showAgenda && (() => agenda.setShowAgenda(false)),
+    contacts.showContacts && (() => contacts.setShowContacts(false)),
+    sms.showSms && (() => sms.setShowSms(false)),
     email.showEmail && (() => email.setShowEmail(false)),
     email.showCfg && (() => email.setShowCfg(false)),
     email.compose && (() => email.setCompose(null)),
@@ -450,9 +458,9 @@ export default function App() {
     speakBuf.current = "";
     if (autoSpeakRef.current) stopSpeak(); // clear any leftover speech before the new turn
     try {
-      // Cloud → il 32B via API (stessa firma + stessi eventi token/done/tool del locale, streaming
-      // identico); i tool_call che il 32B restituisce vengono eseguiti in LOCALE dal backend. `image`
-      // (data URL) va al 32B (Qwen3-VL) per la visione cloud — il generate locale non la usa (visione
+      // Cloud → il 24B via API (stessa firma + stessi eventi token/done/tool del locale, streaming
+      // identico); i tool_call che il 24B restituisce vengono eseguiti in LOCALE dal backend. `image`
+      // (data URL) va al 24B (Qwen3-VL) per la visione cloud — il generate locale non la usa (visione
       // locale = describe_image, flusso a parte).
       // `train`: consenso al salvataggio anonimo (opt-in). Letto FRESH da localStorage per non catturare uno
       // stato stale — se assente/false, il backend NON manda l'header e il server non salva nulla.
@@ -513,8 +521,8 @@ export default function App() {
     // contesto marcio degradava anche le RISPOSTE (allucinazioni). Finestra scorrevole: teniamo solo
     // gli ultimi messaggi entro un budget di caratteri. Memoria lunga → "Riassumi e continua".
     // ⚙️ BUDGET SCALATO per capacità di contesto (2026-07-14): prima era 6000 UNIFORME → anche il cloud
-    // 32B e il desktop (n_ctx 32768) ricevevano solo ~1500 token di storia → "non ricordi il primo
-    // messaggio". Ora: CLOUD (32B, ~40960 ctx) e DESKTOP-locale (32768) ricevono ~tutta la conversazione;
+    // 24B e il desktop (n_ctx 32768) ricevevano solo ~1500 token di storia → "non ricordi il primo
+    // messaggio". Ora: CLOUD (24B, ~40960 ctx) e DESKTOP-locale (32768) ricevono ~tutta la conversazione;
     // ANDROID-locale resta stretto perché n_ctx=4096 col prompt fisso ~3016 token è al limite (anti-crash).
     const CTX_CHAR_BUDGET = cloudMode ? 80000 : isAndroid ? 6000 : 60000;
     const windowed: Node[] = [];
@@ -531,7 +539,7 @@ export default function App() {
       const img = image;
       setImage(null);
       setAttachments([]);
-      // Cloud → l'immagine va al 32B (Qwen3-VL) dentro run/remote_generate. Locale → visione on-device
+      // Cloud → l'immagine va al 24B (Qwen3-VL) dentro run/remote_generate. Locale → visione on-device
       // (describe_image col Gemma), flusso separato.
       if (cloudMode) run(msgs, aid, img);
       else runVision(img, text, aid);
@@ -753,7 +761,7 @@ export default function App() {
 
   // Nome breve del modello in uso, per l'header e il menu (cloud o locale). Dal catalogo (tag), non
   // da euristiche sul nome: coi modelli dinamici (models.json) l'id non è più prevedibile.
-  const modelName = cloudMode ? "Cloud 32B" : md.activeModel.tag;
+  const modelName = cloudMode ? "Cloud 24B" : md.activeModel.tag;
 
   return (
     <div className="app">
@@ -1004,7 +1012,7 @@ export default function App() {
         <div className="modal-overlay">
           <div className="consent">
             <div className="consent-icon">☁️</div>
-            <h3>{t("Modalità Cloud — Liara 32B", "Cloud mode — Liara 32B")}</h3>
+            <h3>{t("Modalità Cloud — Liara 24B", "Cloud mode — Liara 24B")}</h3>
             <p className="consent-action">{t(
               "Molto più capace, ma i tuoi messaggi e i dati che l'assistente legge (file, memoria, posizione, foto) vengono inviati al server. NON è più tutto sul dispositivo.",
               "Far more capable, but your messages and the data the assistant reads (files, memory, location, photos) are sent to the server. It's no longer fully on-device.")}</p>
@@ -1028,7 +1036,7 @@ export default function App() {
                 // locale scaricato. Se invece NESSUN locale è caricato (cloud scelto all'avvio) → istantaneo.
                 const localLoaded = !cloudMode && !md.needDownload && !initializing;
                 setCloudMode(true); // persiste liara_cloud=1 (come setModelId nel cambio tra locali)
-                if (localLoaded) md.setSwitchTo(t("Liara Cloud (32B)", "Liara Cloud (32B)"));
+                if (localLoaded) md.setSwitchTo(t("Liara Cloud (24B)", "Liara Cloud (24B)"));
                 haptic(20);
               }}>{t("☁️ Attiva cloud", "☁️ Enable cloud")}</button>
             </div>
@@ -1064,7 +1072,7 @@ export default function App() {
         <MenuDrawer
           theme={theme}
           emailUnread={email.unread}
-          modelTag={cloudMode ? "☁️ Cloud 32B" : `${md.activeModel.tag} ${md.activeModel.flag}`}
+          modelTag={cloudMode ? "☁️ Cloud 24B" : `${md.activeModel.tag} ${md.activeModel.flag}`}
           autoSpeak={autoSpeak}
           thinking={thinking}
           cloud={cloudMode}
@@ -1073,6 +1081,9 @@ export default function App() {
           onProfile={() => { setShowMenu(false); prof.openProfile(); }}
           onEmail={() => { setShowMenu(false); email.openEmail(); }}
           onAgenda={() => { setShowMenu(false); agenda.openAgenda(); }}
+          isAndroid={isAndroid}
+          onContacts={() => { setShowMenu(false); contacts.openContacts(); }}
+          onSms={() => { setShowMenu(false); sms.openSms(); }}
           onPerms={() => { setShowMenu(false); openPerms(); }}
           onTheme={() => { setShowMenu(false); setShowTheme(true); }}
           onModel={() => { setShowMenu(false); md.openModelDrawer(); }}
@@ -1101,6 +1112,14 @@ export default function App() {
 
       {agenda.showAgenda && (
         <AgendaDrawer agenda={agenda} onBack={() => { agenda.setShowAgenda(false); setShowMenu(true); }} />
+      )}
+
+      {contacts.showContacts && (
+        <ContactsDrawer contacts={contacts} onBack={() => { contacts.setShowContacts(false); setShowMenu(true); }} />
+      )}
+
+      {sms.showSms && (
+        <SmsDrawer sms={sms} onBack={() => { sms.setShowSms(false); setShowMenu(true); }} />
       )}
 
       {email.showEmail && (

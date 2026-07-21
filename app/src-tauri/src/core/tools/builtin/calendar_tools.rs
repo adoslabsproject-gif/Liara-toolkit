@@ -115,3 +115,49 @@ impl Tool for CalendarDelete {
         Ok(format!("Evento #{id} eliminato."))
     }
 }
+
+/// MODIFICA un appuntamento esistente (in-place, stesso id): cambia data/ora (sposta), titolo
+/// (rinomina) e/o note. Un tool solo per ogni edit → per "sposta" il modello NON deve più fare
+/// add+delete (che sbagliava lasciando doppioni): passa id + i soli campi da cambiare. Usa
+/// `Calendar::update` (il metodo core). Sostituisce l'idea del vecchio calendar_move (più stretto).
+pub struct CalendarUpdate {
+    pub cal: Arc<Calendar>,
+}
+impl Tool for CalendarUpdate {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "calendar_update".into(),
+            description: "Modifica un appuntamento ESISTENTE dato il suo numero (id): cambia la data/ora \
+(per SPOSTARLO, formato AAAA-MM-GG HH:MM), il titolo (per rinominarlo) e/o le note. Passa SOLO i campi \
+da cambiare. Usa SEMPRE questo per spostare/modificare un evento (l'appuntamento NON si duplica). Se \
+non sai l'id, prima elenca/cerca."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer", "description": "Numero dell'evento da modificare" },
+                    "when": { "type": "string", "description": "Nuova data e ora, es. 2026-07-25 16:00 (per spostarlo)" },
+                    "title": { "type": "string", "description": "Nuovo titolo (per rinominarlo)" },
+                    "notes": { "type": "string", "description": "Nuove note" }
+                },
+                "required": ["id"]
+            }),
+        }
+    }
+    fn execute(&self, args: &Value) -> Result<String> {
+        let id = args.get("id").and_then(|v| v.as_i64()).ok_or_else(|| anyhow!("manca 'id'"))?;
+        let when = args.get("when").and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty());
+        let title = args.get("title").and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty());
+        let notes = args.get("notes").and_then(|v| v.as_str()); // note vuote = cancella le note (valido)
+        if when.is_none() && title.is_none() && notes.is_none() {
+            return Err(anyhow!("niente da modificare: indica almeno when, title o notes"));
+        }
+        self.cal.update(id, title, when, notes)?;
+        // messaggio parlante di cosa è cambiato
+        let mut done = Vec::new();
+        if let Some(w) = when { done.push(format!("spostato a {w}")); }
+        if let Some(t) = title { done.push(format!("rinominato in \"{t}\"")); }
+        if notes.is_some() { done.push("note aggiornate".into()); }
+        Ok(format!("Evento #{id} {} (nessun doppione).", done.join(", ")))
+    }
+}

@@ -1,13 +1,14 @@
 pub mod core;
 mod commands;
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex};
 
 use tauri::{Emitter, Manager};
 
 use crate::commands::consent::ConsentGate;
 use crate::core::calendar::Calendar;
+use crate::core::contacts::Contacts;
 use crate::core::crypto::Crypto;
 use crate::core::email::EmailStore;
 use crate::core::engine::Engine;
@@ -24,11 +25,22 @@ pub(crate) struct AppState {
     pub(crate) email: Arc<EmailStore>,
     pub(crate) tools: Arc<ToolRegistry>,
     pub(crate) cancel: Arc<AtomicBool>,
+    /// Numero di GENERAZIONE (epoch): avanza a ogni Stop e a ogni nuovo turno cloud. Un run che
+    /// scopre di non essere più il corrente è uno ZOMBIE (Stop premuto / turno nuovo partito) e si
+    /// spegne senza emettere eventi. Serve al cloud: il thread remoto resta bloccato nella POST
+    /// (~120s, non abortibile) e `cancel` da solo non basta — il turno nuovo lo resettava a false
+    /// RIANIMANDO il vecchio run, i cui done/errori sporcavano il turno nuovo (bug "Stop in cloud
+    /// → 'Liara non disponibile' quando riscrivo").
+    pub(crate) gen_seq: Arc<AtomicU64>,
     /// review #6: flag di stato condivisi QUI, non più statiche globali di modulo
     pub(crate) gpu_busy: Arc<AtomicBool>,
     pub(crate) thinking: Arc<AtomicBool>,
     pub(crate) pending_compose: PendingCompose,
     pub(crate) calendar: Arc<Calendar>,
+    /// Rubrica cifrata di Liara (import granulare dalla rubrica di sistema). Vedi core/contacts.
+    pub(crate) contacts: Arc<Contacts>,
+    /// Copia locale cifrata degli SMS (sync su consenso, permesso READ_SMS). Vedi core/sms.
+    pub(crate) sms: Arc<crate::core::sms::SmsStore>,
     pub(crate) tts: Arc<crate::core::audio::TtsQueue>,
     pub(crate) stt: Arc<Mutex<Option<crate::core::audio::Stt>>>,
     pub(crate) rec: Arc<crate::core::audio::RecState>,
@@ -56,9 +68,55 @@ pub fn tool_catalog() -> String {
     let crypto = Arc::new(Crypto::ephemeral());
     let mem = Arc::new(Memory::open(":memory:", crypto.clone()).expect("mem"));
     let email = Arc::new(EmailStore::open(":memory:", crypto.clone()).expect("email"));
-    let cal = Arc::new(Calendar::open(":memory:", crypto).expect("cal"));
+    let cal = Arc::new(Calendar::open(":memory:", crypto.clone()).expect("cal"));
+    let contacts = Arc::new(Contacts::open(":memory:", crypto.clone()).expect("contacts"));
+    let sms = Arc::new(crate::core::sms::SmsStore::open(":memory:", crypto).expect("sms"));
     let pending: PendingCompose = Arc::new(Mutex::new(None));
-    ToolRegistry::build(email, pending, cal, mem).catalog_json()
+    ToolRegistry::build(email, pending, cal, mem, contacts, sms).catalog_json()
+}
+
+/// Build the REAL tool registry → routing JSON (tools-in-order + category keywords). The `dump_routing`
+/// bin prints this so the dataset generator selects tools per-intent IDENTICALLY to the runtime
+/// (anti-drift, twin of `tool_catalog`). Gate: `gate_routing_equiv.py`.
+pub fn tool_routing() -> String {
+    use crate::core::calendar::Calendar;
+    use crate::core::crypto::Crypto;
+    use crate::core::email::EmailStore;
+    use crate::core::memory::Memory;
+    let crypto = Arc::new(Crypto::ephemeral());
+    let mem = Arc::new(Memory::open(":memory:", crypto.clone()).expect("mem"));
+    let email = Arc::new(EmailStore::open(":memory:", crypto.clone()).expect("email"));
+    let cal = Arc::new(Calendar::open(":memory:", crypto.clone()).expect("cal"));
+    let contacts = Arc::new(Contacts::open(":memory:", crypto.clone()).expect("contacts"));
+    let sms = Arc::new(crate::core::sms::SmsStore::open(":memory:", crypto).expect("sms"));
+    let pending: PendingCompose = Arc::new(Mutex::new(None));
+    ToolRegistry::build(email, pending, cal, mem, contacts, sms).routing_json()
+}
+
+/// ORACOLO di selezione per-intento: le categorie che il runtime attiverebbe per `request`, separate
+/// da virgola (ordine stabile). Usato dal bin `select_cats` → gate `gate_routing_equiv.py` per provare
+/// che il port Python (`app_routing.selected_categories`) è byte-identico a `selected_categories` Rust.
+pub fn select_categories(request: &str) -> String {
+    crate::core::tools::selected_categories(request).join(",")
+}
+
+/// Blocco `[AVAILABLE_TOOLS]` Mistral REALE (dal registry, sottoinsieme routed) per una richiesta.
+/// Usato dal bin `dump_chat` + gate `verify_equiv_mistral.py` per la prova anti-drift Rust==mistral-common.
+pub fn mistral_tools_block(request: &str) -> String {
+    use crate::core::calendar::Calendar;
+    use crate::core::crypto::Crypto;
+    use crate::core::email::EmailStore;
+    use crate::core::memory::Memory;
+    let crypto = Arc::new(Crypto::ephemeral());
+    let mem = Arc::new(Memory::open(":memory:", crypto.clone()).expect("mem"));
+    let email = Arc::new(EmailStore::open(":memory:", crypto.clone()).expect("email"));
+    let cal = Arc::new(Calendar::open(":memory:", crypto.clone()).expect("cal"));
+    let contacts = Arc::new(Contacts::open(":memory:", crypto.clone()).expect("contacts"));
+    let sms = Arc::new(crate::core::sms::SmsStore::open(":memory:", crypto).expect("sms"));
+    let pending: PendingCompose = Arc::new(Mutex::new(None));
+    ToolRegistry::build(email, pending, cal, mem, contacts, sms)
+        .mistral_tools_block_for(request)
+        .unwrap_or_default()
 }
 
 /// Log di avvio su file: scrive ogni tappa del boot in `boot.log` (cartella dati app). Se l'app
@@ -91,6 +149,20 @@ pub fn run() {
             std::fs::create_dir_all(&dir).ok();
             let _ = std::fs::remove_file(dir.join("boot.log")); // log pulito ad ogni avvio
             boot_log(&dir, "1-start");
+            // PANIC HOOK diagnostico: qualunque panic Rust (su QUALSIASI thread — warmup, ureq cloud,
+            // tool, audio) viene scritto in boot.log con messaggio e posizione, PRIMA che il processo
+            // muoia. Così un crash "da solo, staccato dal PC" (che non si riesce a vedere in logcat live)
+            // lascia una traccia leggibile: `run-as com.liara.app cat boot.log` mostra l'ultima riga
+            // = la causa. Non cattura gli abort NATIVI (SIGSEGV/SIGABRT del C++), ma distingue subito
+            // "panic Rust" da "kill di sistema/OOM" (in quel caso l'ultima riga resta uno stadio di boot).
+            {
+                let logdir = dir.clone();
+                let prev = std::panic::take_hook();
+                std::panic::set_hook(Box::new(move |info| {
+                    boot_log(&logdir, &format!("PANIC {info}"));
+                    prev(info);
+                }));
+            }
             // macOS (Apple Silicon, macOS 26.1): i "residency sets" di Metal — feature ggml ≥ macOS 15, con
             // un thread heartbeat in background — lanciano un'eccezione ObjC/Metal durante l'inferenza sul
             // M4 Pro → risale oltre il confine FFI in Rust ("foreign exception") → abort dell'app (crash
@@ -149,6 +221,8 @@ pub fn run() {
             let memory = Arc::new(Memory::open(&dbp, crypto.clone()).expect("open memory db"));
             let email = Arc::new(EmailStore::open(&dbp, crypto.clone()).expect("open email store"));
             let calendar = Arc::new(Calendar::open(&dbp, crypto.clone()).expect("open calendar"));
+            let contacts = Arc::new(Contacts::open(&dbp, crypto.clone()).expect("open contacts"));
+            let sms = Arc::new(crate::core::sms::SmsStore::open(&dbp, crypto.clone()).expect("open sms"));
             boot_log(&dir, "4-db-ok");
             let pending_compose: PendingCompose = Arc::new(Mutex::new(None));
             let mut tools = ToolRegistry::build(
@@ -156,6 +230,8 @@ pub fn run() {
                 pending_compose.clone(),
                 calendar.clone(),
                 memory.clone(),
+                contacts.clone(),
+                sms.clone(),
             );
             boot_log(&dir, "4a-before-mcp"); // marker diagnostici granulari: localizzano il crash "appena
             tools.add_dynamic(crate::core::mcp::connect_configured()); // MCP host (LIARA_MCP)
@@ -181,6 +257,7 @@ pub fn run() {
                 email,
                 tools,
                 cancel: Arc::new(AtomicBool::new(false)),
+                gen_seq: Arc::new(AtomicU64::new(0)),
                 gpu_busy: Arc::new(AtomicBool::new(false)),
                 // thinking ON di default: il LoRA v6 (attuale) USA il ragionamento per chiamare i tool
                 // correttamente — senza, i tool non vengono invocati o male. (Era OFF per il v4, addestrato
@@ -188,6 +265,8 @@ pub fn run() {
                 thinking: Arc::new(AtomicBool::new(true)),
                 pending_compose,
                 calendar,
+                contacts,
+                sms,
                 tts: Arc::new(crate::core::audio::TtsQueue::start({
                     let h = app.handle().clone();
                     move || { let _ = h.emit("tts-idle", ()); }
@@ -380,6 +459,14 @@ pub fn run() {
             peer_remove,
             pick_contact,
             scan_qr,
+            contacts_sync,
+            contacts_import,
+            contacts_list,
+            contacts_update,
+            contacts_delete,
+            sms_sync,
+            sms_count,
+            sms_list,
             liara_reply
         ])
         .build(tauri::generate_context!())

@@ -39,8 +39,8 @@ Usa gli strumenti quando servono per AGIRE o per dati reali (email, agenda, file
 cancellato un appuntamento, cercato sul web — se non hai EFFETTIVAMENTE chiamato lo strumento corrispondente in QUESTO \
 turno. Se l'azione serve, CHIAMA lo strumento; non raccontare a parole un esito che non hai ottenuto da uno strumento \
 (niente 'email inviata', 'nessuna email da X', 'file creato' senza la relativa chiamata). \
-Per SPOSTARE o RIPROGRAMMARE un appuntamento esistente: prima calendar_delete quello vecchio (per id), POI calendar_add \
-il nuovo orario — NON fare solo calendar_add o crei un DOPPIONE. \
+Per SPOSTARE, RIPROGRAMMARE o RINOMINARE un appuntamento esistente usa calendar_update (per id, coi soli campi \
+da cambiare) — NON creare un nuovo evento con calendar_add o lasci un DOPPIONE. \
 Puoi VEDERE le immagini e le foto che l'utente allega: quando ne arriva una, analizzala direttamente e \
 descrivi con precisione cosa contiene. NON dire MAI che non puoi vedere immagini, foto, webcam o video — \
 sei un modello multimodale e le vedi eccome. \
@@ -61,7 +61,7 @@ Parla in italiano in modo naturale e discorsivo, come in una vera conversazione:
 e quando è utile fai una domanda di chiarimento o proponi il passo successivo. Evita le risposte \
 telegrafiche, ma senza dilungarti. NON ripeterti e non ripetere quanto hai già detto. Non firmarti.";
 use serde_json::{json, Value};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use tauri::{Emitter, State, WebviewWindow};
 
 const DEFAULT_URL: &str = "https://liara.nothumanallowed.com/v1/chat/completions";
@@ -205,9 +205,18 @@ fn parse_mistral_text_calls(raw: &str, out: &mut Vec<Value>) {
 /// UNA chiamata al 32B (NON-streaming). ⚠️ `stream:false` è OBBLIGATORIO per l'AFFIDABILITÀ dei tool: in
 /// streaming il 32B NON è coerente nel formato del tool-call (a volte `<tool_call>{…}`, a volte JSON NUDO
 /// `{"name":…,"arguments":…}`) → non li catturavamo → il tool NON partiva (es. appuntamento non salvato).
-/// Non-stream ritorna `tool_calls` STRUTTURATI e affidabili. Il testo (risposta) si emette via on_token.
-/// Trade-off: la risposta appare tutta insieme (non parola-per-parola). Lo streaming affidabile tornerà
-/// quando i modelli formatteranno i tool in modo coerente (gold seed) o con un hybrid dedicato.
+/// Non-stream ritorna `tool_calls` STRUTTURATI e affidabili. Trade-off: la risposta appare tutta insieme
+/// (non parola-per-parola). Lo streaming affidabile tornerà quando i modelli formatteranno i tool in modo
+/// coerente (gold seed) o con un hybrid dedicato.
+/// ⚠️ NON emette nulla verso la UI: il testo lo emette il CHIAMANTE dopo il check anti-zombie (gen_seq) —
+/// così un run superato da Stop/nuovo turno non può sporcare lo stream del turno corrente.
+/// ⚠️ TRASPORTO = ureq (NON reqwest): reqwest 0.13 tira `rustls-platform-verifier`, che su ANDROID
+/// PANICA se non inizializzato con la JNI ("Expect rustls-platform-verifier to be initialized") — e
+/// `use_preconfigured_tls` NON lo bypassa. ureq usa i webpki-roots bundlati (come web.rs/weather.rs) e
+/// non tocca quel crate: è il trasporto già provato su Android per tutto l'HTTPS dell'app. Costo: con
+/// `stream:false` vLLM genera tutto server-side PRIMA di rispondere, quindi lo Stop non può abortire la
+/// generazione lato server (non c'è finestra: gli header arrivano già a generazione finita). Lo Stop
+/// resta immediato lato UI (il frontend sblocca al click) e il risultato zombie viene scartato (gen_seq).
 fn call_once(
     url: &str,
     model: &str,
@@ -217,8 +226,6 @@ fn call_once(
     think: bool, // ragionamento del 32B (nel loop cloud è forzato a false, vedi remote_generate)
     max_tokens: u32, // budget risposta scelto dall'utente (preset; il cloud ha contesto ~40k → generoso)
     conv_id: &str, // id conversazione STABILE → header `x-liara-conversation-id` (dedup server); vuoto = non inviato
-    sink: &mut dyn AgentSink,
-    _cancel: &AtomicBool,
 ) -> anyhow::Result<(String, Vec<Value>)> {
     let body = json!({
         "model": model,
@@ -247,8 +254,8 @@ fn call_once(
     // #3 RETRY su errore di TRASPORTO (connessione abortita / timeout di rete — os error 103 dopo ~20s = il
     // proxy chiude la connessione lunga, NON un rate-limit). Ritentiamo fino a 3 volte con backoff. Un errore
     // HTTP di stato (4xx/5xx) NON si ritenta (è già una risposta del server) → propaga subito. La request va
-    // RICOSTRUITA a ogni tentativo (send_string la consuma). Header: x-liara-model (modello reale; il body
-    // `model` resta "liara" per il routing vLLM), x-liara-training (solo su consenso), x-liara-conversation-id.
+    // RICOSTRUITA a ogni tentativo. Header: x-liara-model (modello reale; il body `model` resta "liara"
+    // per il routing vLLM), x-liara-training (solo su consenso), x-liara-conversation-id.
     let body_str = body.to_string();
     let real_model = std::env::var("LIARA_API_MODEL_REAL").unwrap_or_else(|_| "liara-32b".into());
     let resp = {
@@ -294,10 +301,6 @@ fn call_once(
         let parsed = parse_tool_calls_from_text(&content);
         if !parsed.is_empty() { tool_calls = parsed; content.clear(); }
     }
-    // emetti il testo SOLO se è una vera risposta finale (nessun tool da eseguire)
-    if !content.is_empty() && tool_calls.is_empty() {
-        sink.on_token(&content);
-    }
     Ok((content, tool_calls))
 }
 
@@ -327,6 +330,13 @@ pub async fn remote_generate(
     let consent = state.consent.clone();
     let cancel = state.cancel.clone();
     cancel.store(false, Ordering::Relaxed);
+    // ANTI-ZOMBIE: questo run diventa il CORRENTE avanzando l'epoch. Il run precedente — magari
+    // ancora bloccato nella sua POST (~120s, ureq non è abortibile) nonostante lo Stop — al
+    // risveglio si confronta con gen_seq, si scopre superato e MUORE IN SILENZIO: niente round in
+    // più, niente done/status/errori che sporcherebbero QUESTO turno (era il bug "Stop → riscrivo
+    // → 'Liara non disponibile'": il reset di `cancel` qui sopra RIANIMAVA il vecchio run).
+    let gen_seq = state.gen_seq.clone();
+    let my_gen = gen_seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     let w = window.clone();
 
     tauri::async_runtime::spawn_blocking(move || -> anyhow::Result<String> {
@@ -364,20 +374,37 @@ pub async fn remote_generate(
         let model = api_model();
 
         let _ = w.emit("status", "cloud");
+        // zombie = un run più nuovo (o uno Stop) ha avanzato l'epoch mentre eravamo dentro la POST
+        // bloccante. Lo Stop è immediato lato UI (il frontend sblocca al click); qui il compito è NON
+        // far emettere nulla al run superato — né token, né done, né errori nel turno nuovo.
+        let is_stale = || gen_seq.load(std::sync::atomic::Ordering::SeqCst) != my_gen;
         let mut final_answer = String::new();
         for _round in 0..MAX_ROUNDS {
-            if cancel.load(Ordering::Relaxed) {
-                break;
+            if cancel.load(Ordering::Relaxed) || is_stale() {
+                return Ok(String::new()); // superati: nessun evento, nessun errore
             }
-            // call_once (non-stream) emette il testo via on_token e ci ritorna (testo, tool_calls STRUTTURATI).
-            let (content, tool_calls) = call_once(&url, &model, &msgs, &tool_defs, train, think, max_tokens, &conv_id, &mut sink, &cancel)?;
+            let res = call_once(&url, &model, &msgs, &tool_defs, train, think, max_tokens, &conv_id);
+            // il check va FATTO QUI, appena svegli dalla POST: se nel frattempo siamo diventati zombie
+            // (Stop premuto / turno nuovo partito) scartiamo TUTTO l'esito, anche un eventuale errore
+            // (non deve finire in una bolla UI del turno nuovo)
+            if cancel.load(Ordering::Relaxed) || is_stale() {
+                return Ok(String::new());
+            }
+            let (content, tool_calls) = res?;
             if tool_calls.is_empty() {
-                final_answer = content; // risposta finale (nessun altro tool richiesto)
+                // risposta finale: il testo si emette SOLO da run corrente (call_once non emette più)
+                if !content.is_empty() {
+                    sink.on_token(&content);
+                }
+                final_answer = content;
                 break;
             }
             // registra il turno assistant coi tool_calls, poi esegui ogni tool IN LOCALE
             msgs.push(json!({ "role": "assistant", "content": content, "tool_calls": tool_calls }));
             for tc in &tool_calls {
+                if is_stale() {
+                    return Ok(String::new()); // niente tool eseguiti da un run superato
+                }
                 let id = tc["id"].as_str().unwrap_or("");
                 let name = tc["function"]["name"].as_str().unwrap_or("");
                 let args_str = tc["function"]["arguments"].as_str().unwrap_or("{}");
@@ -398,8 +425,12 @@ pub async fn remote_generate(
                 msgs.push(json!({ "role": "tool", "tool_call_id": id, "name": name, "content": result }));
             }
         }
-        let _ = w.emit("status", "ready");
-        let _ = w.emit("done", &final_answer);
+        // ready/done SOLO dal run corrente: il done di uno zombie azzererebbe streamTarget/busy
+        // del frontend mentre il turno nuovo sta ancora generando (risposta persa nel vuoto)
+        if !is_stale() {
+            let _ = w.emit("status", "ready");
+            let _ = w.emit("done", &final_answer);
+        }
         Ok(final_answer)
     })
     .await

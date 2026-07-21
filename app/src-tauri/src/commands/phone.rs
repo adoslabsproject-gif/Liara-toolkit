@@ -111,8 +111,10 @@ pub extern "system" fn Java_com_liara_app_MainActivity_nativeContactPicked<'loca
 }
 
 /// JNI verso `MainActivity.launchContactPick()` (statico companion), stesso pattern di android_keystore.
+/// `pub(crate)`: `call_static_void` è il ponte generico verso i lanci statici di MainActivity — lo
+/// riusa anche commands/contacts.rs (launchContactsRead).
 #[cfg(target_os = "android")]
-mod android {
+pub(crate) mod android {
     use anyhow::{anyhow, Context, Result};
     use jni::objects::{JObject, JString, JValue};
 
@@ -126,7 +128,7 @@ mod android {
     }
 
     /// Chiama un metodo statico `()V` del companion di MainActivity via JNI (class loader dell'app).
-    fn call_static_void(method: &str) -> Result<()> {
+    pub(crate) fn call_static_void(method: &str) -> Result<()> {
         let ctx = ndk_context::android_context();
         let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }.context("JavaVM")?;
         let mut env = vm.attach_current_thread().context("attach thread JNI")?;

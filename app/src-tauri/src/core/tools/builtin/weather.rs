@@ -57,6 +57,50 @@ pub(crate) fn geocode(city: &str) -> Result<(f64, f64, String)> {
     Ok((lat, lon, format!("{name}{}", if country.is_empty() { String::new() } else { format!(", {country}") })))
 }
 
+/// Reverse geocoding: coordinate → nome di città ("Modena, Italia"). Serve perché il fix GPS del
+/// dispositivo dà SOLO lat/lon: senza questo, la posizione resterebbe l'etichetta muta "posizione
+/// GPS" — illeggibile nelle Impostazioni e inutile al modello ("dove sono?").
+/// ⚠️ Open-Meteo NON ha un endpoint reverse (verificato: 404) → usiamo BigDataCloud (HTTPS, senza
+/// chiave, pensato per il client-side) con Nominatim/OSM come riserva. Entrambi in italiano.
+/// PRIVACY: manda le coordinate a un terzo, come già fa il meteo. Si chiama UNA volta per fix
+/// (l'esito viene memorizzato come label), non a ogni domanda.
+pub(crate) fn reverse_geocode(lat: f64, lon: f64) -> Result<String> {
+    let compose = |city: &str, country: &str| {
+        let city = city.trim();
+        if city.is_empty() {
+            return None;
+        }
+        Some(match country.trim() {
+            "" => city.to_string(),
+            c => format!("{city}, {c}"),
+        })
+    };
+    // 1) BigDataCloud: `city` a volte è vuoto sui piccoli comuni → ripiego su `locality`.
+    let url = format!(
+        "https://api.bigdatacloud.net/data/reverse-geocode-client?latitude={lat}&longitude={lon}&localityLanguage=it"
+    );
+    if let Ok(j) = get_json(&url) {
+        let s = |k: &str| j.get(k).and_then(|v| v.as_str()).unwrap_or("");
+        let city = if s("city").trim().is_empty() { s("locality") } else { s("city") };
+        if let Some(label) = compose(city, s("countryName")) {
+            return Ok(label);
+        }
+    }
+    // 2) Nominatim (OSM): zoom=10 = livello comune. User-Agent identificativo come da policy d'uso.
+    let url = format!(
+        "https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lon}&format=json&accept-language=it&zoom=10"
+    );
+    let j = get_json(&url)?;
+    let a = j.get("address").ok_or_else(|| anyhow!("reverse geocoding senza indirizzo"))?;
+    let s = |k: &str| a.get(k).and_then(|v| v.as_str()).unwrap_or("");
+    let city = ["city", "town", "village", "municipality", "county"]
+        .into_iter()
+        .map(s)
+        .find(|v| !v.trim().is_empty())
+        .unwrap_or("");
+    compose(city, s("country")).ok_or_else(|| anyhow!("città non determinabile da queste coordinate"))
+}
+
 /// Approximate device location from the public IP (city-level; GPS-free fallback).
 /// PRIVACY: usa ipwho.is via HTTPS. Prima era `http://ip-api.com` in CHIARO → la geolocalizzazione
 /// dell'utente viaggiava in cleartext, incoerente con un'app che si presenta "privata e locale"
@@ -125,6 +169,53 @@ impl Tool for Weather {
     }
 }
 
+/// Etichetta segnaposto scritta da `set_gps` prima che il reverse-geocoding risolva la città.
+/// Se la vediamo qui significa che la risoluzione non è ancora avvenuta (o è fallita) → la
+/// rifacciamo su richiesta e la memorizziamo. Fonte unica: commands/memory.rs la usa per scriverla.
+pub(crate) const GPS_PLACEHOLDER: &str = "posizione GPS";
+
+/// "Dove sono?" — la posizione CORRENTE del dispositivo, in chiaro (città).
+/// Legge quella già rilevata dall'app (GPS o impostata a mano): non attiva sensori, non chiede
+/// permessi. Chiude il cerchio della posizione — prima l'app la rilevava ma il modello non aveva
+/// modo di DIRLA, quindi improvvisava.
+pub struct MyLocation {
+    pub mem: Arc<Memory>,
+}
+impl Tool for MyLocation {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec {
+            name: "my_location".into(),
+            description: "Dice dove si trova l'utente adesso (città), usando la posizione già rilevata dal \
+dispositivo. Usalo per \"dove sono?\", \"dove siamo?\", \"in che città siamo?\"."
+                .into(),
+            parameters: json!({ "type": "object", "properties": {}, "required": [] }),
+        }
+    }
+    fn execute(&self, _args: &Value) -> Result<String> {
+        let Some((lat, lon, label)) = self.mem.location() else {
+            return Ok("Posizione non disponibile: chiedi all'utente di attivare il GPS (Impostazioni → \
+Su di me → Sincronizza) oppure di dirti in che città si trova."
+                .into());
+        };
+        // label già risolta (città) → risposta immediata, ZERO rete
+        if label.trim() != GPS_PLACEHOLDER {
+            return Ok(format!("L'utente si trova a {label}."));
+        }
+        // fix GPS non ancora tradotto in città (risoluzione in background non finita o fallita):
+        // risolviamo ORA e memorizziamo, così la prossima volta è istantanea e le Impostazioni
+        // mostrano la città invece dell'etichetta grezza.
+        match reverse_geocode(lat, lon) {
+            Ok(city) => {
+                let _ = self.mem.set_location(lat, lon, &city, "gps");
+                Ok(format!("L'utente si trova a {city}."))
+            }
+            Err(_) => Ok("La posizione GPS è rilevata ma non sono riuscita a risalire alla città \
+(rete non disponibile). Chiedi all'utente in che città si trova."
+                .into()),
+        }
+    }
+}
+
 /// Lets Liara set the user's current location when they state it (e.g. "sono a Bologna").
 /// Persists until a fresh GPS fix overrides it. Used by the weather/location tools.
 pub struct SetLocation {
@@ -147,5 +238,43 @@ impl Tool for SetLocation {
         let (lat, lon, label) = geocode(loc)?;
         self.mem.set_location(lat, lon, &label, "manual").map_err(|e| anyhow!("{e}"))?;
         Ok(format!("Posizione impostata su {label}. La userò finché non cambia."))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::crypto::Crypto;
+
+    fn mem() -> Arc<Memory> {
+        Arc::new(Memory::open(":memory:", Arc::new(Crypto::from_key(&[21u8; 32]))).unwrap())
+    }
+
+    #[test]
+    fn my_location_senza_posizione_spiega_come_attivarla() {
+        // niente GPS e niente città impostata → NON deve inventare un luogo, deve dire come fare
+        let out = MyLocation { mem: mem() }.execute(&json!({})).unwrap();
+        assert!(out.contains("non disponibile"), "{out}");
+        assert!(out.to_lowercase().contains("gps") && out.contains("città"));
+    }
+
+    #[test]
+    fn my_location_legge_la_citta_senza_toccare_la_rete() {
+        // il caso NORMALE: posizione già risolta (da set_gps o da set_location) → lettura locale.
+        // Il test gira offline in CI: se my_location facesse rete qui, fallirebbe.
+        let m = mem();
+        m.set_location(44.6471, 10.9252, "Modena, Italia", "gps").unwrap();
+        let out = MyLocation { mem: m }.execute(&json!({})).unwrap();
+        assert_eq!(out, "L'utente si trova a Modena, Italia.");
+    }
+
+    #[test]
+    fn my_location_non_spaccia_il_segnaposto_per_una_citta() {
+        // fix GPS non ancora tradotto: senza rete NON deve rispondere "sei a posizione GPS"
+        // (era il rischio: etichetta interna presentata come luogo reale).
+        let m = mem();
+        m.set_location(44.6471, 10.9252, GPS_PLACEHOLDER, "gps").unwrap();
+        let out = MyLocation { mem: m }.execute(&json!({})).unwrap();
+        assert!(!out.contains(&format!("a {GPS_PLACEHOLDER}")), "segnaposto spacciato per città: {out}");
     }
 }

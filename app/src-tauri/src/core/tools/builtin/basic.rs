@@ -14,8 +14,23 @@ impl Tool for DateTime {
         }
     }
     fn execute(&self, _args: &Value) -> Result<String> {
+        use chrono::Datelike;
+        // 🔴 FIX: prima usava `%A` → giorno in INGLESE ("Sunday") e i modelli, ragionando in italiano,
+        // se lo RICALCOLAVANO da soli sbagliando ("sabato" invece di domenica). Ora il giorno esce già
+        // in italiano, in forma naturale e discorsiva: il modello lo LEGGE, non lo indovina.
+        const GIORNI: [&str; 7] = ["lunedì", "martedì", "mercoledì", "giovedì", "venerdì", "sabato", "domenica"];
+        const MESI: [&str; 12] = [
+            "gennaio", "febbraio", "marzo", "aprile", "maggio", "giugno",
+            "luglio", "agosto", "settembre", "ottobre", "novembre", "dicembre",
+        ];
         let now = chrono::Local::now();
-        Ok(now.format("%d/%m/%Y %H:%M:%S (%A)").to_string())
+        let g = GIORNI[now.weekday().num_days_from_monday() as usize];
+        let m = MESI[now.month0() as usize];
+        // es. "domenica 19 luglio 2026, ore 11:23 (19/07/2026)"
+        Ok(format!(
+            "{} {} {} {}, ore {} ({})",
+            g, now.day(), m, now.year(), now.format("%H:%M"), now.format("%d/%m/%Y")
+        ))
     }
 }
 

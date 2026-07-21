@@ -1,5 +1,5 @@
 //! The ReAct tool loop: the model thinks, calls tools, observes, and answers.
-use super::format::{format_chat, Dialect, Message};
+use super::format::{format_chat, to_mistral_json, Dialect, Message};
 use super::parse::{extract_tool_call, strip_markers};
 use super::stream::StreamRouter;
 use crate::core::engine::{Engine, GenOptions};
@@ -29,24 +29,41 @@ fn forced_call(name: &str, args: serde_json::Value) -> String {
 }
 
 /// Il risultato di un tool iniettato nel prompt, nel formato NATIVO del dialetto. Qwen:
-/// `<tool_response>…`. Mistral: `[TOOL_RESULTS]…[/TOOL_RESULTS]`. Gemma/Cohere: testo neutro —
-/// imiterebbero un marker estraneo e lo leakerebbero nella risposta.
-fn tool_resp(result: &str, dialect: Dialect) -> String {
+/// `<tool_response>…`. Mistral: `[TOOL_RESULTS] {"content":..,"call_id":..}[/TOOL_RESULTS]` (wire-format
+/// mistral-common — ordine chiavi content→call_id ESPLICITO, spazio dopo `[TOOL_RESULTS]`, STANDALONE).
+/// Gemma/Cohere: testo neutro — imiterebbero un marker estraneo e lo leakerebbero nella risposta.
+fn tool_resp(result: &str, dialect: Dialect, call_id: &str) -> String {
     match dialect {
         Dialect::Qwen => format!("<tool_response>\n{result}\n</tool_response>"),
-        Dialect::Mistral => format!("[TOOL_RESULTS]{result}[/TOOL_RESULTS]"),
+        Dialect::Mistral => {
+            let content = to_mistral_json(&serde_json::Value::String(result.to_string()));
+            let cid = to_mistral_json(&serde_json::Value::String(call_id.to_string()));
+            format!("[TOOL_RESULTS] {{\"content\": {content}, \"call_id\": {cid}}}[/TOOL_RESULTS]")
+        }
         Dialect::Gemma | Dialect::Cohere => format!("Risultato dello strumento:\n{result}"),
     }
 }
 
+/// call_id POSIZIONALE (9 alnum: `c` + 8 cifre) che lega tool-call↔tool-result nel formato Mistral.
+/// Identico a `mistral_runtime.call_id` (SSOT del gate) e a `to_native` del training: è un CORRELATORE
+/// (input, mascherato in training), quindi conta solo che sia deterministico e uguale su tutti i lati.
+fn mistral_call_id(idx: usize) -> String {
+    format!("c{idx:08}")
+}
+
 /// Come registrare nel contesto (turno assistant) il tool-call appena emesso, nel formato che QUEL
-/// modello emette davvero (train==runtime). Qwen: `<tool_call>{…}`. Mistral: `[TOOL_CALLS][{…}]`.
+/// modello emette davvero (train==runtime). Qwen: `<tool_call>{…}`. Mistral: `[TOOL_CALLS] [{…}]` SENZA
+/// id (ordine name→arguments esplicito, spazio dopo `[TOOL_CALLS]` che lo special token assorbe).
 /// Gemma/Cohere: una nota in linguaggio naturale — se rivedessero un blocco di un altro dialetto nel
 /// PROPRIO turno lo imiterebbero, tornando a leakare i marker; la frase dà lo stesso grounding.
 fn assistant_toolcall(name: &str, args: &serde_json::Value, dialect: Dialect) -> String {
     match dialect {
         Dialect::Qwen => format!("<tool_call>\n{{\"name\": \"{name}\", \"arguments\": {args}}}\n</tool_call>"),
-        Dialect::Mistral => format!("[TOOL_CALLS][{{\"name\": \"{name}\", \"arguments\": {args}}}]"),
+        Dialect::Mistral => {
+            let name_json = to_mistral_json(&serde_json::Value::String(name.to_string()));
+            let args_json = to_mistral_json(args);
+            format!("[TOOL_CALLS] [{{\"name\": {name_json}, \"arguments\": {args_json}}}]")
+        }
         Dialect::Gemma | Dialect::Cohere => format!("Ho usato lo strumento {name} con argomenti {args}."),
     }
 }
@@ -144,10 +161,19 @@ pub fn run_agent(
     // and include ONLY the tools relevant to the request (smaller prompt, better choice)
     let now = registry.execute("datetime", &serde_json::json!({})).unwrap_or_default();
     let base = format!("Data e ora correnti: {now}.\n{base_system}");
-    let system = if registry.is_empty() {
+    // Qwen/Gemma/Cohere: gli strumenti vanno nel system come blocco Hermes `# Tools`. MISTRAL NO: usa il
+    // blocco NATIVO `[AVAILABLE_TOOLS]` (costruito sotto e passato a format_chat) → system PULITO, altrimenti
+    // erediterebbe il formato Qwen e romperebbe train==runtime.
+    let system = if registry.is_empty() || dialect == Dialect::Mistral {
         base
     } else {
         format!("{}{}", base, registry.prompt_block_for(&routing_window))
+    };
+    // Blocco `[AVAILABLE_TOOLS]` SOLO per Mistral (wire-format nativo), col sottoinsieme routed; None altrove.
+    let tools_block: Option<String> = if dialect == Dialect::Mistral && !registry.is_empty() {
+        registry.mistral_tools_block_for(&routing_window)
+    } else {
+        None
     };
     // GBNF: forces a valid tool-call JSON once the model emits <tool_call> (lazy in the engine).
     // SOLO Qwen: Gemma emette il SUO formato nativo (`<|tool_call>call:…`), su cui la grammar Qwen
@@ -198,7 +224,7 @@ pub fn run_agent(
             };
             raw = forced_call("weather", args);
         } else {
-            let prompt = format_chat(&system, &convo, thinking, dialect);
+            let prompt = format_chat(&system, &convo, thinking, dialect, tools_block.as_deref());
             let opts = GenOptions {
                 // #2 FIX: budget più ampio (era 700) così, col reasoning ON, il <think> non affama la
                 // risposta. Il papiro-loop è già contenuto dalla repeat/frequency penalty (llama.rs
@@ -252,9 +278,12 @@ pub fn run_agent(
                         role: "assistant".into(),
                         content: assistant_toolcall(&name, &args, dialect),
                     });
+                    // Mistral: tool-result role `tool` (reso STANDALONE da format_chat_mistral, fuori [INST]);
+                    // gli altri dialetti lo reiniettano come `user` (Qwen usa il role verbatim → NON cambiare).
+                    let cid = mistral_call_id(convo.len());
                     convo.push(Message {
-                        role: "user".into(),
-                        content: tool_resp(&result, dialect),
+                        role: if dialect == Dialect::Mistral { "tool".into() } else { "user".into() },
+                        content: tool_resp(&result, dialect, &cid),
                     });
                     continue;
                 }
@@ -268,16 +297,19 @@ pub fn run_agent(
                 role: "assistant".into(),
                 content: assistant_toolcall(&name, &args, dialect),
             });
+            // Mistral: tool-result role `tool` (STANDALONE); altri dialetti `user` (Qwen role verbatim).
+            let cid = mistral_call_id(convo.len());
             convo.push(Message {
-                role: "user".into(),
-                content: tool_resp(&result, dialect),
+                role: if dialect == Dialect::Mistral { "tool".into() } else { "user".into() },
+                content: tool_resp(&result, dialect, &cid),
             });
             continue;
         }
         return Ok(strip_markers(&raw));
     }
     // out of tool steps: force a plain answer (no tools, no technical message)
-    let prompt = format_chat(base_system, &convo, thinking, dialect);
+    // Risposta FINALE "senza tool" (esauriti gli step): base_system pulito, nessun [AVAILABLE_TOOLS].
+    let prompt = format_chat(base_system, &convo, thinking, dialect, None);
     let opts = GenOptions {
         max_tokens: 400,
         temperature,
@@ -632,6 +664,22 @@ mod tests {
         assert!(capped.ends_with("…(troncato)"));
         assert!(capped.chars().count() <= MAX_TOOL_RESULT_CHARS + 20);
     }
+
+    #[test]
+    fn mistral_tool_helpers_wire_format() {
+        // Forma NATIVA mistral-common (verificata byte/token dal gate verify_equiv_mistral.py):
+        // tool-call SENZA id, spazi `", "/": "`, tool-result standalone con content→call_id.
+        let args = serde_json::json!({ "location": "Modena" });
+        assert_eq!(
+            super::assistant_toolcall("weather", &args, super::Dialect::Mistral),
+            "[TOOL_CALLS] [{\"name\": \"weather\", \"arguments\": {\"location\": \"Modena\"}}]"
+        );
+        assert_eq!(
+            super::tool_resp("28°C", super::Dialect::Mistral, "c00000002"),
+            "[TOOL_RESULTS] {\"content\": \"28°C\", \"call_id\": \"c00000002\"}[/TOOL_RESULTS]"
+        );
+        assert_eq!(super::mistral_call_id(2), "c00000002");
+    }
 }
 
 /// Test d'INTEGRAZIONE del ReAct loop (review round-4): prima `run_agent` — il cuore
@@ -699,8 +747,10 @@ mod integration {
         let crypto = Arc::new(Crypto::from_key(&[4u8; 32]));
         let mem = Arc::new(Memory::open(":memory:", crypto.clone()).unwrap());
         let email = Arc::new(EmailStore::open(":memory:", crypto.clone()).unwrap());
-        let cal = Arc::new(Calendar::open(":memory:", crypto).unwrap());
-        ToolRegistry::build(email, Arc::new(Mutex::new(None)), cal, mem)
+        let cal = Arc::new(Calendar::open(":memory:", crypto.clone()).unwrap());
+        let contacts = Arc::new(crate::core::contacts::Contacts::open(":memory:", crypto.clone()).unwrap());
+        let sms = Arc::new(crate::core::sms::SmsStore::open(":memory:", crypto).unwrap());
+        ToolRegistry::build(email, Arc::new(Mutex::new(None)), cal, mem, contacts, sms)
     }
 
     fn drive(eng: &FakeEngine, user: &str, sink: &mut RecSink) -> String {

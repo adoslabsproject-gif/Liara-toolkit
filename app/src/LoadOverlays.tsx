@@ -27,10 +27,10 @@ export function LoadOverlays({ md, initializing, settling, status, onUseCloud }:
             </div>
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: 12, width: "86%", maxWidth: 360 }}>
-              {/* Opzione cloud: parti SUBITO senza scaricare nulla (il 32B gira sul server). I dati escono
+              {/* Opzione cloud: parti SUBITO senza scaricare nulla (il 24B gira sul server). I dati escono
                   dal dispositivo → l'attivazione passa dal consenso (onUseCloud apre il modale). */}
               <button className="dl-btn dl-cloud" style={{ margin: 0, textAlign: "left", lineHeight: 1.35 }} onClick={onUseCloud}>
-                ☁️ <b>{t("Liara Cloud (32B)", "Liara Cloud (32B)")}</b> · {t("subito, niente da scaricare", "start now, nothing to download")}<br />
+                ☁️ <b>{t("Liara Cloud (24B)", "Liara Cloud (24B)")}</b> · {t("subito, niente da scaricare", "start now, nothing to download")}<br />
                 <small style={{ fontWeight: 400, opacity: .9 }}>{t("La più capace · via internet · i dati escono dal dispositivo", "The most capable · over the internet · data leaves the device")}</small>
               </button>
               {md.visibleModels.map((m) => (

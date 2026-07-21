@@ -3,6 +3,7 @@
 pub mod audio;
 pub mod calendar;
 pub mod consent;
+pub mod contacts;
 pub mod download;
 pub mod email;
 pub mod generate;
@@ -14,11 +15,13 @@ pub mod phone;
 pub mod rag;
 pub mod remote;
 pub mod sink;
+pub mod sms;
 pub mod vision;
 
 pub use audio::*;
 pub use calendar::*;
 pub use consent::*;
+pub use contacts::*;
 pub use download::*;
 pub use email::*;
 pub use generate::*;
@@ -29,4 +32,5 @@ pub use peer_ai::*;
 pub use phone::*;
 pub use rag::*;
 pub use remote::*;
+pub use sms::*;
 pub use vision::*;

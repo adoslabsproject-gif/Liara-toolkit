@@ -267,7 +267,18 @@ impl Engine for LlamaEngine {
         on_token: &mut dyn FnMut(&str),
     ) -> Result<String> {
         let slot = (opts.cache_slot as usize).min(self.gen.len() - 1);
-        let mut guard = self.gen[slot].lock().unwrap();
+        // Recupero dal mutex AVVELENATO: se un turno precedente è panicato durante il decode, un
+        // `.unwrap()` qui farebbe panicare OGNI turno successivo (engine "brickato" fino al riavvio).
+        // Recuperiamo lo stato E resettiamo la KV-cache (che potrebbe essere incoerente) → l'engine
+        // riparte pulito invece di restare morto. (La cache si ricostruisce al prossimo prefill.)
+        let mut guard = self.gen[slot].lock().unwrap_or_else(|poisoned| {
+            let mut g = poisoned.into_inner();
+            if let Some(st) = g.as_mut() {
+                st.ctx.clear_kv_cache();
+                st.tokens.clear();
+            }
+            g
+        });
         if guard.is_none() {
             let ctx = self.model.new_context(self.backend, self.ctx_params(slot)).context("new context")?;
             *guard = Some(GenState { ctx, tokens: Vec::new() });
@@ -407,11 +418,17 @@ impl Engine for LlamaEngine {
 
             batch.clear();
             batch.add(token, n_cur, &[0], true)?;
+            // 🔴 CONSISTENZA cache↔st.tokens: DECODIFICA PRIMA di aggiornare lo stato. Se il decode
+            // fallisce (ritorna Err), st.tokens NON deve contenere un token che la KV-cache non ha:
+            // altrimenti il turno DOPO trova un prefisso "valido" più lungo del reale → posizioni
+            // sfalsate → decode in errore/degenere → la CONVERSAZIONE resta rotta finché non se ne
+            // apre una NUOVA (che diverge dal system e resetta la cache). Era il bug "Liara non
+            // disponibile, ma basta una nuova chat". Ora l'errore è pulito e non corrompe lo stato.
+            st.ctx.decode(&mut batch).context("decode")?;
             st.tokens.push(token);
             n_cur += 1;
             generated += 1;
             sample_idx = 0;
-            st.ctx.decode(&mut batch).context("decode")?;
         }
         let dt = t_decode.elapsed().as_secs_f64();
         eprintln!(

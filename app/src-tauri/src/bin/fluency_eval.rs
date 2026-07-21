@@ -50,7 +50,7 @@ fn main() -> anyhow::Result<()> {
         let full = if bitnet {
             format!("System: {SYSTEM_PROMPT}<|eot_id|>User: {prompt}<|eot_id|>Assistant: ")
         } else {
-            format_chat(SYSTEM_PROMPT, &msgs, thinking, dialect)
+            format_chat(SYSTEM_PROMPT, &msgs, thinking, dialect, None)
         };
         let opts = GenOptions {
             max_tokens: 1024,

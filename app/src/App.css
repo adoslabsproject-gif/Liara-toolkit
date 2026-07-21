@@ -320,6 +320,29 @@ body { background: var(--bg); color: var(--txt); font-family: var(--font); }
 .mailsender { font-size: 12px; color: var(--mut); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .mailsubj { font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .mailrow.unseen .mailsubj { font-weight: 700; }
+/* rubrica: checkbox di selezione contatti — esente dallo stile dei text-input di .pgroup */
+.pgroup .mailrow input[type="checkbox"] { padding: 0; width: 18px; height: 18px; flex: none;
+  accent-color: var(--accent); }
+/* Sincronizza rubrica: lista NUOVI in un box scrollabile + barra di conferma STICKY sotto (sempre
+   visibile, niente scroll fino in fondo per trovare "Importa"). */
+.synclist .pickscroll { max-height: 42vh; overflow-y: auto; display: flex; flex-direction: column;
+  gap: 2px; border: 1px solid var(--line); border-radius: 10px; padding: 4px; }
+.stickybar { position: sticky; bottom: 0; padding-top: 8px; background: var(--panel); }
+.stickybar .send-sm { width: 100%; }
+.hint.inline { display: inline; font-size: 12px; }
+/* badge "personalizzato" accanto al nome del contatto modificato in-app */
+.tag-custom { margin-left: 6px; font-size: 10.5px; font-weight: 600; color: var(--accent);
+  border: 1px solid var(--accent); border-radius: 6px; padding: 1px 5px; vertical-align: middle; }
+/* riga di modifica contatto (nome + numero + azioni) */
+.editrow { display: flex; flex-direction: column; gap: 6px; padding: 8px 4px;
+  border: 1px solid var(--accent); border-radius: 10px; }
+.editrow-actions { display: flex; gap: 8px; }
+.editrow-actions .send-sm { flex: 1; }
+/* elenco SMS: riga a tutta larghezza col corpo del messaggio a capo (non troncato) */
+.smsrow { align-items: flex-start; cursor: default; }
+.smsrow.out { background: rgba(124,92,255,.06); }
+.smsdate { color: var(--mut); font-weight: 400; font-size: 11px; }
+.smsbody { font-size: 13px; color: var(--txt); white-space: pre-wrap; word-break: break-word; margin-top: 2px; }
 .mailhead { padding: 4px 0; }
 .mailbody { white-space: pre-wrap; word-wrap: break-word; font-size: 13.5px; line-height: 1.5;
   background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 12px;

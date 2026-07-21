@@ -521,6 +521,10 @@ Il nuovo AGGIORNA o CONTRADDICE il vecchio (stesso argomento, informazione cambi
 #[tauri::command]
 pub fn stop_generation(state: State<AppState>) {
     state.cancel.store(true, Ordering::Relaxed);
+    // Invalida il run CORRENTE (serve al cloud): il thread remoto, bloccato nella POST non
+    // abortibile, al risveglio scopre di essere zombie e si spegne senza emettere nulla.
+    // Il locale non ne ha bisogno (controlla `cancel` per-token) ma non gli nuoce.
+    state.gen_seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// Android: RIMUOVE il task dell'app (`ActivityManager.AppTask.finishAndRemoveTask()`) prima di uscire.

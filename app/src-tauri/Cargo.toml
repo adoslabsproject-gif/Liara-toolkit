@@ -34,6 +34,9 @@ webpki-roots = "0.26"
 ring = "0.17"
 chrono = "0.4"
 meval = "0.2"
+# HTTP: ureq (bloccante, TLS rustls+webpki-roots bundlati) per TUTTO — cloud incluso. ⛔ NON
+# reintrodurre reqwest per il cloud: tira `rustls-platform-verifier`, che su Android PANICA se non
+# inizializzato con la JNI e `use_preconfigured_tls` non lo bypassa (vedi commento in remote.rs).
 ureq = "2"
 # estrazione dei modelli audio (liara-audio.zip scaricato on-demand da GitHub). Solo deflate:
 # niente bzip2/zstd/lzma (dipendenze native che complicherebbero il build Android).

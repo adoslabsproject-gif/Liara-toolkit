@@ -58,8 +58,27 @@ pub fn delete_conversation(id: String, state: State<AppState>) -> Result<(), Str
 
 #[tauri::command]
 pub fn set_gps(latitude: f64, longitude: f64, state: State<AppState>) -> Result<(), String> {
+    use crate::core::tools::builtin::weather::{reverse_geocode, GPS_PLACEHOLDER};
     // a fresh device GPS fix; overrides a manual correction (per the user's wish)
-    state.memory.set_location(latitude, longitude, "posizione GPS", "gps").map_err(|e| e.to_string())
+    // Salviamo SUBITO le coordinate con un'etichetta segnaposto: il fix non si perde mai, e il
+    // comando ritorna all'istante (parte all'avvio dell'app: non deve aspettare la rete).
+    state
+        .memory
+        .set_location(latitude, longitude, GPS_PLACEHOLDER, "gps")
+        .map_err(|e| e.to_string())?;
+    // Poi, IN BACKGROUND, traduciamo le coordinate in una città vera: così lo slot Posizione delle
+    // Impostazioni mostra "Modena" invece di "posizione GPS", e il tool my_location risponde senza
+    // toccare la rete. Se fallisce (offline) resta il segnaposto e my_location riproverà da solo.
+    let mem = state.memory.clone();
+    std::thread::spawn(move || {
+        if let Ok(city) = reverse_geocode(latitude, longitude) {
+            // scrive solo se nel frattempo l'utente NON ha corretto la posizione a mano
+            if mem.location().map(|(_, _, l)| l == GPS_PLACEHOLDER).unwrap_or(false) {
+                let _ = mem.set_location(latitude, longitude, &city, "gps");
+            }
+        }
+    });
+    Ok(())
 }
 
 /// Posizione corrente per la UI Impostazioni: (label, source) con source ∈ {"gps","manual"}. None se assente.

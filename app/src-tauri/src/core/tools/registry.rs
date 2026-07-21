@@ -1,14 +1,16 @@
 //! Holds the available tools, renders the Qwen tool prompt, and dispatches calls.
 use super::builtin::{
-    Calculator, CalendarAdd, CalendarDelete, CalendarList, CalendarSearch, DateTime, EmailDraft,
-    EmailRecent, EmailReply, EmailSearch, EmailSend, EmailSent, FsDelete, FsList, FsMove, FsRead, FsSearch,
-    FsWrite, NoteAdd, NoteList, NoteSearch, PeerAsk, PeerConnect, PeerProposeSlot, PhoneCall,
-    SetLocation, SmsSend, Weather, WebFetch, WebSearch,
+    Calculator, CalendarAdd, CalendarDelete, CalendarUpdate, CalendarList, CalendarSearch, ContactSearch,
+    DateTime, EmailDraft, EmailRecent, EmailReply, EmailSearch, EmailSend, EmailSent, FsDelete, FsList,
+    FsMove, FsRead, FsSearch, FsWrite, MyLocation, NoteAdd, NoteList, NoteSearch, PeerAsk, PeerConnect,
+    PeerProposeSlot, PhoneCall, SetLocation, SmsRecent, SmsSearch, SmsSend, Weather, WebFetch, WebSearch,
 };
 use super::{PendingCompose, Tool};
 use crate::core::calendar::Calendar;
+use crate::core::contacts::Contacts;
 use crate::core::email::EmailStore;
 use crate::core::memory::Memory;
+use crate::core::sms::SmsStore;
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -57,12 +59,12 @@ fn tool_category(name: &str) -> &'static str {
         "notes"
     } else if name == "web_fetch" || name == "web_search" {
         "web"
-    } else if name == "weather" || name == "set_location" {
-        "weather"
+    } else if name == "weather" || name == "set_location" || name == "my_location" {
+        "weather" // famiglia meteo+POSIZIONE (leggere/impostare dove sei): stesso intento d'uso
     } else if name.starts_with("peer_") {
         "peer"
-    } else if name == "phone_call" || name == "sms_send" {
-        "phone"
+    } else if name == "phone_call" || name == "contact_search" || name.starts_with("sms_") {
+        "phone" // include sms_send/sms_recent/sms_search e la rubrica: stessa famiglia d'intento
     } else {
         "core" // datetime, calculator
     }
@@ -152,7 +154,129 @@ fn fuzzy_has(words: &[&str], keyword: &str) -> bool {
         .any(|win| win.iter().zip(&kws).all(|(w, k)| word_matches(k, w)))
 }
 
-fn selected_categories(request: &str) -> Vec<&'static str> {
+/// SSOT delle keyword per categoria. Usata da `selected_categories` (runtime) E esportata da
+/// `routing_json` (→ dataset via `dump_routing`): un'UNICA tabella, impossibile che le due copie
+/// driftino. L'ordine delle righe = ordine di push nelle categorie → stabile (chiave del gate di
+/// equivalenza). I commenti d'intento (perché una keyword c'è) restano qui accanto alle righe.
+static CATEGORY_KEYWORDS: &[(&str, &[&str])] = &[
+    // email: oltre a email/posta, i modi di chiedere una VERIFICA di ricezione ("è arrivata la
+    // fattura", "ho ricevuto la conferma", "controlla se mi è arrivat") → email_search.
+    ("email", &["email", "mail", "posta", "casella", "inbox", "scritto", "messaggi", "rispondi",
+                "risposta", "invia", "inviat", "manda", "scrivi a", "scrivere a", "mittente",
+                "arrivata la", "arrivata una", "ho ricevuto", "è arrivat", "conferma della",
+                "conferma dell", "conferma dal", "cerca se mi", "controlla se ho", "controlla se mi",
+                "scrivi gli", "scrivi una mail", "scrivi un'email", "gli auguri", "avvisa"]),
+    // calendar: oltre ai nomi (agenda/appuntamento/evento) i VERBI naturali del fissare/spostare/
+    // annullare un impegno. "segna"/"fissa"/"metti" (+ "in agenda"), "che ho domani/oggi/stasera",
+    // "quando ho/avevo". "sposta"/"cancella"/"annulla"/"organizza"/"prenota" sono condivisi con files
+    // (ambiguità evento↔file): GENEROSO → entrambe le famiglie nel prompt, il modello sceglie.
+    ("calendar", &["agenda", "appuntament", "event", "calendar", "impegn", "ricordami", "promemoria",
+                   "scadenz", "riunion", "in programma", "che ho da fare", "segna", "fissa", "mettimi",
+                   "metti in agenda", "in agenda", "che ho domani", "che ho oggi", "che ho stasera",
+                   "che ho questa settimana", "quando ho", "quando avevo", "annulla", "organizza",
+                   "prenota", "sposta", "cancella", "anticipa", "posticipa", "rimanda", "colloquio",
+                   "aggiungi", "che ho ", "cosa ho ", "quanto manca", "la settimana prossima",
+                   "settimana prossima", "riprogramma", "cambia l'orario", "l'orario della",
+                   "l'orario del", "metti che", "porta la", "togli la nota", "quanti giorni mancano",
+                   // peer-scheduling: proponi/vederci/call/coordina → serve calendar_list (controlla
+                   // l'agenda PRIMA di proporre, come da spec di peer_propose_slot) → co-seleziona calendar
+                   "vederci", "vedervi", "una call", "coordina col", "proponi al", "chiamalo", "mettilo",
+                   "chiamala", "mettila"]),
+    // files: oltre a file/cartella, i VERBI di apertura/lettura ("apri", "leggimi") e i nomi-documento
+    // ricorrenti (manuale/diario/ricetta/lista/checklist/contratto) — l'utente dice "apri la ricetta",
+    // non "apri il file ricetta". "elimina"/"scompatta" per le operazioni sui file.
+    ("files", &["file", "cartella", "directory", "document", "download", "scarica il", "crea un file",
+                "scrivi su", "salva nel file", "elimina il", "cancella il", "sposta", "rinomina",
+                "apri ", "leggimi", "leggi il", "leggi la", "leggi i", "leggi le", "leggi ", "checklist",
+                "il manuale", "il diario", "la ricetta", "la lista", "il contratto", "elimina",
+                "scompatt", "aggiungi al diario", "dove ho salvato", "sul computer", "sul desktop",
+                "sulla scrivania", "dalla scrivania", "fammi vedere", "trova le foto", "trova il",
+                "trova la", "trova e", "il backup", "le foto del", "la bolletta", "il curriculum",
+                "il libretto", "cancellalo", "idee della festa", "budget", "cancella la", "cancella lo",
+                "nota vocale", "screenshot", "backup_"]),
+    // notes = memoria personale (salva/richiama FATTI). GENEROSO: "ricord*"/"segna" (condivisi con
+    // calendar), i frasari di dettatura fatto ("ti dico", "il mio/la mia X è", "mi chiamo", "sono
+    // allergic", password/codice/pin/wifi/targa) e di richiamo ("mi ricordi", "come si chiamava",
+    // "te l'avevo detto"). Un fatto personale è salvato/richiamato molto più spesso di quanto una
+    // keyword stretta prenda → meglio note_* in più nel prompt (≈150 tok) che il modello che inventa.
+    ("notes", &["appunt", "annota", "segnati", "prendi nota", "nota che", "i miei appunt", "ricord",
+                "segna", "ti dico", "ti ho detto", "ti avevo detto", "te l'ho detto", "te l'avevo detto",
+                "che ti ho detto", "mi ricordi", "come si chiamava", "come si chiama", "il mio", "la mia",
+                "i miei", "le mie", "mi chiamo", "sono allergic", "la password", "il codice", "il pin",
+                "il wifi", "la targa", "il mio numero di", "che taglia", "che numero di", "tieni presente",
+                "tienilo presente", "tienilo a mente", "tienine conto", "tienilo", "salvami", "salvamelo",
+                "mettimi una nota", "una nota di", "non farmelo dimenticare", "non farmi dimenticare",
+                "che avevo scritto", "che numeri", "dove ho parcheggiato", "dove avevo parcheggiato",
+                "dove avevo", "avevo parcheggiato", "avevo messo", "avevo lasciato", "dove ho messo",
+                "dove ho lasciato", "il compleanno di", "mia moglie",
+                "mia mamma", "mia figlia", "mio marito", "mio figlio", "cosa mi aveva detto", "tieni a mente",
+                "aggiorna la nota", "la nota", "del mio", "della mia", "avevo salvato", "chi era",
+                "che volo avevo", "abbonament", "qual è il numero", "che giorni lavoro", "c'è la babysitter",
+                "cerca nelle note", "nelle note", "cosa avevo salvato"]),
+    // peer (chat AI↔AI): collegare/presentare/coordinare col Liara di un altro.
+    ("peer", &["liara di", "collega", "presenta", "conosci il", "coordina con", "combina con",
+               "l'altro liara", "senti il liara", "peer", "invita ", "proponi al", "rispondi al liara",
+               "chiedi al liara", "col liara", "il suo id è", "chiedigli", "chiedile", "ha liara"]),
+    // phone: chiamate, SMS (invio E lettura) e rubrica — "che numero ha Marco", "cosa mi ha scritto
+    // Marco" (sms), "contatta Luca". "contatt" (fuzzy ≥5) copre contatto/contatti/contattare.
+    ("phone", &["chiama", "telefona", "chiamare", "telefonare", "fai una chiamata", "componi il numero",
+                "sms", "messaggino", "manda un messaggio", "scrivi un sms", "manda un sms", "texta",
+                "rubrica", "contatt", "che numero ha", "il numero di telefono"]),
+    // web: GENEROSO — oltre a "cerca", copre le ricerche locali/fattuali ("meccanico della zona",
+    // "numero del ristorante", "dove", "quanto costa", "orari") che prima non attivavano web →
+    // il modello, senza web_search, si inventava nomi/numeri/luoghi.
+    ("web", &["cerca", "notiz", "cerc", "http", "www", ".com", ".it", "sito", "web", "internet",
+              "online", "in rete", "prezzo", "quotazion", "aggiornament", "novità", "novita",
+              "trova", "trovami", "dove ", "dov'è", "dove si", "vicin", "in zona", "della zona",
+              "qui vicino", "numero di", "numero del", "numero della", "indirizzo", "recension",
+              "miglior", "consigli", "quanto costa", "quanto cost", "quanto viene", "orari",
+              "a che ora apre", "aperto", "quanti abitant", "chi ha vinto", "chi è ", "cos'è",
+              "come si ", "significa", "ristorant", "pizzeri", "negozio", "meccanic", "idraulic",
+              "elettricist", "farmaci", "farmacia", "dottore", "medico", "ospedale", "hotel",
+              "voli", "treno", "treni", "ricetta", "a che ora gioca", "meglio comprare", "quanto si prende",
+              "quanto ci mette", "che documenti servono", "dammi il telefono", "che ore sono a",
+              "proponimi qualcosa", "qualcosa da fare", "cosa fare", "l'articolo", "articolo più",
+              "notizie del giorno",
+              // LOOKUP AZIENDA/ATTIVITÀ (caso reale app): "cosa fa la ditta X", "di cosa si occupa Y",
+              // "che lavoro fa Z" → senza web_search il modello INVENTAVA l'attività. + attualità
+              // generica ("che succede nel mondo") e sport ("prossimo derby") che vanno via web.
+              "di cosa si occupa", "cosa fa la ditta", "che lavoro fa", "la ditta", "che ditta",
+              "che azienda", "l'azienda", "che roba è", "che roba c'è", "succede nel mondo",
+              "che succede nel mondo", "derby", "prossima partita", "chi gioca",
+              "cosa fanno alla", "cosa fanno da", "cosa fanno alla ", "che fanno alla",
+              // PREVISIONI meteo (futuro): il tool `weather` fa solo il meteo ATTUALE → le previsioni
+              // ("domani/prossimi giorni/weekend/pioverà/che tempo farà") vanno via web_search. Queste
+              // frasi attivano già weather (tempo/meteo/piover); qui aggiungiamo web così web_search è
+              // disponibile per il forecast (weather=ora, web=previsione — come insegna il gold).
+              "previsioni", "che tempo farà", "tempo farà", "pioverà", "prossimi giorni",
+              "prossima settimana", "nel weekend", "il weekend", "del weekend", "meteo del", "meteo di",
+              "controlla il meteo", "come si mette", "quando piove", "quando è prevista", "e domani"]),
+    // weather include set_location. "il tempo" copre "il tempo per domani"/"com'è il tempo" (caso
+    // reale 17/07). Falso positivo "il tempo vola" = solo 2 spec in più nel prompt, ok.
+    // weather include set_location. Oltre al meteo, i modi naturali di COMUNICARE la posizione
+    // ("sono a X", "mi trovo a", "da oggi sono a", "imposta la posizione", "cambio città", "sono in
+    // vacanza a") → il modello sa dove sei per meteo/ricerche locali. "ombrello" = meteo implicito.
+    ("weather", &["meteo", "tempo fa", "che tempo", "il tempo", "tempo domani", "temperatura",
+                  "previsioni", "pioggia", "pioverà", "dove sono", "mia posizione", "la mia città",
+                  "imposta la città", "dove mi trovo", "gradi", "farà caldo", "farà freddo",
+                  "fa caldo", "fa freddo", "clima", "sono a ", "mi trovo", "sono qui", "da oggi sono",
+                  "da ora", "adesso sono", "imposta la posizione", "come mia città", "come posizione",
+                  "cambio città", "sono tornato", "sono in vacanza", "spostami come posizione",
+                  "imposta la mia posizione", "ombrello", "vivo a", "abito a", "sto a ", "spostami a",
+                  "in trasferta a", "sede di", "imposta come città", "aggiornami la posizione",
+                  "da domani lavoro", "cambio, adesso",
+                  // METEO ATTUALE detto in modi naturali (caso reale: senza weather nel prompt il
+                  // modello inventava). "piove" (presente, oltre a pioggia/pioverà), + frasi comuni.
+                  "piove", "che aria tira", "com'è fuori", "come è fuori", "com'è il cielo", "il cielo",
+                  "stendere i panni", "c'è il sole", "c'è vento", "fa bello", "fa brutto",
+                  // POSIZIONE CHIESTA (my_location): "dove sono"/"dove mi trovo" c'erano già per
+                  // set_location, qui le forme al PLURALE e le domande sulla città/zona — senza,
+                  // "dove siamo?" non portava il tool nel prompt e il modello tirava a indovinare.
+                  "dove siamo", "in che città", "che città", "in quale città", "posizione",
+                  "qui vicino", "in che zona", "dove ci troviamo", "località"]),
+];
+
+pub fn selected_categories(request: &str) -> Vec<&'static str> {
     let r = norm(request);
     let words: Vec<&str> = r.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
     // Prima il match ESATTO di sempre (substring, zero regressioni), poi il fuzzy anti-refuso:
@@ -164,55 +288,10 @@ fn selected_categories(request: &str) -> Vec<&'static str> {
         })
     };
     let mut cats = vec!["core"];
-    if has(&["email", "mail", "posta", "casella", "inbox", "scritto", "messaggi", "rispondi",
-             "risposta", "invia", "inviat", "manda", "scrivi a", "scrivere a", "mittente"]) {
-        cats.push("email");
-    }
-    if has(&["agenda", "appuntament", "event", "calendar", "impegn", "ricordami", "promemoria",
-             "scadenz", "riunion", "in programma", "che ho da fare"]) {
-        cats.push("calendar");
-    }
-    if has(&["file", "cartella", "directory", "document", "download", "scarica il", "crea un file",
-             "scrivi su", "salva nel file", "elimina il", "cancella il", "sposta", "rinomina"]) {
-        cats.push("files");
-    }
-    if has(&["appunt", "annota", "segnati", "prendi nota", "nota che", "i miei appunt"]) {
-        cats.push("notes");
-    }
-    // peer (chat AI↔AI): quando l'utente vuole collegare/presentare/coordinare col Liara di un altro.
-    if has(&["il liara di", "collega", "presenta", "conosci il", "coordina con", "combina con",
-             "l'altro liara", "senti il liara", "peer", "invita "]) {
-        cats.push("peer");
-    }
-    // phone: quando l'utente vuole chiamare qualcuno o mandare un SMS (hand-off all'app di sistema).
-    if has(&["chiama", "telefona", "chiamare", "telefonare", "fai una chiamata", "componi il numero",
-             "sms", "messaggino", "manda un messaggio", "scrivi un sms", "manda un sms", "texta"]) {
-        cats.push("phone");
-    }
-    // web: GENEROSO (meglio un tool in più che il modello che INVENTA per mancanza dello strumento).
-    // Oltre alle forme di "cerca", copre le RICERCHE LOCALI/FATTUALI comuni ("trovami un meccanico
-    // della zona", "numero del ristorante", "dove...", "quanto costa", "orari", "chi ha vinto") che
-    // prima NON attivavano web → il modello, senza web_search, si inventava nomi/numeri/luoghi.
-    if has(&["cerca", "notiz", "cerc", "http", "www", ".com", ".it", "sito", "web", "internet",
-             "online", "in rete", "prezzo", "quotazion", "aggiornament", "novità", "novita",
-             "trova", "trovami", "dove ", "dov'è", "dove si", "vicin", "in zona", "della zona",
-             "qui vicino", "numero di", "numero del", "numero della", "indirizzo", "recension",
-             "miglior", "consigli", "quanto costa", "quanto cost", "quanto viene", "orari",
-             "a che ora apre", "aperto", "quanti abitant", "chi ha vinto", "chi è ", "cos'è",
-             "come si ", "significa", "ristorant", "pizzeri", "negozio", "meccanic", "idraulic",
-             "elettricist", "farmaci", "farmacia", "dottore", "medico", "ospedale", "hotel",
-             "voli", "treno", "treni", "ricetta"]) {
-        cats.push("web");
-    }
-    // weather include set_location: "dove sono/mia posizione/imposta città" → il modello sa dove sei.
-    // "il tempo" copre le forme naturali "il tempo per/di domani", "com'è il tempo", "dimmi il
-    // tempo" (caso reale 17/07: senza, weather restava fuori dal prompt e il modello negava di
-    // avere i tool). Falso positivo tipo "il tempo vola" = solo 2 spec in più nel prompt, ok.
-    if has(&["meteo", "tempo fa", "che tempo", "il tempo", "tempo domani", "temperatura",
-             "previsioni", "pioggia", "pioverà", "dove sono", "mia posizione", "la mia città",
-             "imposta la città", "dove mi trovo", "gradi", "farà caldo", "farà freddo",
-             "fa caldo", "fa freddo", "clima"]) {
-        cats.push("weather");
+    for (cat, kws) in CATEGORY_KEYWORDS {
+        if has(kws) {
+            cats.push(cat);
+        }
     }
     cats
 }
@@ -298,7 +377,14 @@ fn args_object_grammar(schema: &Value) -> String {
 
 impl ToolRegistry {
     /// Build the registry, wiring tools to the resources they need.
-    pub fn build(email: Arc<EmailStore>, pending: PendingCompose, cal: Arc<Calendar>, mem: Arc<Memory>) -> Self {
+    pub fn build(
+        email: Arc<EmailStore>,
+        pending: PendingCompose,
+        cal: Arc<Calendar>,
+        mem: Arc<Memory>,
+        contacts: Arc<Contacts>,
+        sms: Arc<SmsStore>,
+    ) -> Self {
         Self {
             tools: vec![
                 Box::new(DateTime),
@@ -307,6 +393,7 @@ impl ToolRegistry {
                 Box::new(WebSearch),
                 Box::new(Weather { mem: mem.clone() }),
                 Box::new(SetLocation { mem: mem.clone() }),
+                Box::new(MyLocation { mem: mem.clone() }),
                 Box::new(EmailRecent { store: email.clone() }),
                 Box::new(EmailSent { store: email.clone() }),
                 Box::new(EmailSearch { store: email.clone() }),
@@ -316,7 +403,8 @@ impl ToolRegistry {
                 Box::new(CalendarAdd { cal: cal.clone() }),
                 Box::new(CalendarList { cal: cal.clone() }),
                 Box::new(CalendarSearch { cal: cal.clone() }),
-                Box::new(CalendarDelete { cal }),
+                Box::new(CalendarDelete { cal: cal.clone() }),
+                Box::new(CalendarUpdate { cal }),
                 Box::new(FsList),
                 Box::new(FsRead),
                 Box::new(FsSearch),
@@ -330,9 +418,14 @@ impl ToolRegistry {
                 Box::new(PeerConnect),
                 Box::new(PeerAsk),
                 Box::new(PeerProposeSlot),
-                // Telefono: hand-off all'app di sistema (chiamata/SMS), nessun permesso pericoloso.
-                Box::new(PhoneCall),
-                Box::new(SmsSend),
+                // Telefono: hand-off all'app di sistema (chiamata/SMS); `number` accetta anche un
+                // NOME risolto contro la rubrica cifrata (omonimia 0/1/>1).
+                Box::new(PhoneCall { contacts: contacts.clone() }),
+                Box::new(SmsSend { contacts: contacts.clone() }),
+                // Rubrica + lettura SMS (store locale cifrato, sync su consenso dell'utente).
+                Box::new(ContactSearch { contacts: contacts.clone() }),
+                Box::new(SmsRecent { store: sms.clone(), contacts: contacts.clone() }),
+                Box::new(SmsSearch { store: sms, contacts }),
             ],
         }
     }
@@ -351,6 +444,30 @@ impl ToolRegistry {
         let arr: Vec<Value> =
             self.tools.iter().map(|t| compact_tool_value(&t.spec())).collect();
         serde_json::to_string_pretty(&Value::Array(arr)).unwrap_or_default()
+    }
+
+    /// Il ROUTING per-intento come JSON — SSOT per la SELEZIONE tool del dataset (anti-drift), gemello
+    /// di `catalog_json`. Contiene: `tools_in_order` (i tool in ordine di REGISTRAZIONE, ognuno con la
+    /// sua categoria → il generatore filtra per categoria mantenendo lo STESSO ordine con cui il runtime
+    /// rende il blocco `[AVAILABLE_TOOLS]`) e `category_keywords` (la tabella keyword di
+    /// `selected_categories`). Con la stessa `norm`/`fuzzy_has` portata in Python, la selezione del
+    /// dataset è byte-identica al runtime. Esportato da `dump_routing`; gate: `gate_routing_equiv.py`.
+    pub fn routing_json(&self) -> String {
+        let tools: Vec<Value> = self
+            .tools
+            .iter()
+            .map(|t| {
+                let name = t.spec().name;
+                let cat = tool_category(&name);
+                json!({ "name": name, "category": cat })
+            })
+            .collect();
+        let cats: Vec<Value> = CATEGORY_KEYWORDS
+            .iter()
+            .map(|(c, kws)| json!({ "category": c, "keywords": kws }))
+            .collect();
+        serde_json::to_string_pretty(&json!({ "tools_in_order": tools, "category_keywords": cats }))
+            .unwrap_or_default()
     }
 
     /// Tool in formato OpenAI (`[{type:"function", function:{name,description,parameters}}]`) per la
@@ -484,6 +601,34 @@ impl ToolRegistry {
         self.render(&self.selected_tools(request))
     }
 
+    /// Blocco `[AVAILABLE_TOOLS] […][/AVAILABLE_TOOLS]` per il dialetto **Mistral** (wire-format
+    /// mistral-common v3), col SOTTOINSIEME pertinente alla richiesta (stessa `selected_tools` di Qwen).
+    /// `None` se non ci sono tool. Ordine chiavi ESPLICITO (`type`→`function`, poi `name`/`description`/
+    /// `parameters`) perché serde ordina alfabeticamente; i VALORI via `to_mistral_json` (spaziato `", "/": "`).
+    /// I `parameters` restano serde-ordinati = come li serializza `compact_tool_value`/l'export del catalogo,
+    /// e mistral-common ne preserva l'ordine → train==runtime. Verificato byte-exact dal gate (via `dump_chat`).
+    pub fn mistral_tools_block_for(&self, request: &str) -> Option<String> {
+        let tools = self.selected_tools(request);
+        if tools.is_empty() {
+            return None;
+        }
+        let entries: Vec<String> = tools
+            .iter()
+            .map(|t| {
+                let cv = compact_tool_value(&t.spec());
+                let null = Value::Null;
+                let j = |k: &str| crate::core::agent::to_mistral_json(cv.get(k).unwrap_or(&null));
+                format!(
+                    "{{\"type\": \"function\", \"function\": {{\"name\": {}, \"description\": {}, \"parameters\": {}}}}}",
+                    j("name"),
+                    j("description"),
+                    j("parameters")
+                )
+            })
+            .collect();
+        Some(format!("[AVAILABLE_TOOLS] [{}][/AVAILABLE_TOOLS]", entries.join(", ")))
+    }
+
     /// Il SOTTOINSIEME di tool pertinenti alla richiesta — UNICA fonte per prompt E grammatica, così
     /// il modello vede e PUÒ chiamare esattamente gli stessi 3-8 strumenti (mai i 30 interi). `core`
     /// (datetime, calculator) è sempre incluso da `selected_categories`.
@@ -520,6 +665,19 @@ For each function call, return a json object with function name and arguments wi
 mod selection_tests {
     use super::*;
 
+    /// Registry di test con TUTTI gli store in-memory (seed diverso per isolare i DB).
+    fn test_registry(seed: u8) -> ToolRegistry {
+        use crate::core::crypto::Crypto;
+        use std::sync::Mutex;
+        let crypto = Arc::new(Crypto::from_key(&[seed; 32]));
+        let mem = Arc::new(Memory::open(":memory:", crypto.clone()).unwrap());
+        let email = Arc::new(EmailStore::open(":memory:", crypto.clone()).unwrap());
+        let cal = Arc::new(Calendar::open(":memory:", crypto.clone()).unwrap());
+        let contacts = Arc::new(Contacts::open(":memory:", crypto.clone()).unwrap());
+        let sms = Arc::new(SmsStore::open(":memory:", crypto).unwrap());
+        ToolRegistry::build(email, Arc::new(Mutex::new(None)), cal, mem, contacts, sms)
+    }
+
     #[test]
     fn tool_category_classifica_tutte_le_famiglie() {
         assert_eq!(tool_category("datetime"), "core");
@@ -532,6 +690,20 @@ mod selection_tests {
         assert_eq!(tool_category("web_search"), "web");
         assert_eq!(tool_category("weather"), "weather");
         assert_eq!(tool_category("set_location"), "weather");
+        // famiglia phone allargata: rubrica + lettura SMS viaggiano con chiamate/invio
+        assert_eq!(tool_category("phone_call"), "phone");
+        assert_eq!(tool_category("sms_send"), "phone");
+        assert_eq!(tool_category("contact_search"), "phone");
+        assert_eq!(tool_category("sms_recent"), "phone");
+        assert_eq!(tool_category("sms_search"), "phone");
+    }
+
+    #[test]
+    fn intenti_rubrica_e_sms_attivano_phone() {
+        assert!(selected_categories("che numero ha Marco?").contains(&"phone"));
+        assert!(selected_categories("cerca luca nella rubrica").contains(&"phone"));
+        assert!(selected_categories("contatta Marco").contains(&"phone")); // fuzzy "contatt"
+        assert!(selected_categories("leggi gli ultimi sms").contains(&"phone"));
     }
 
     #[test]
@@ -552,6 +724,11 @@ mod selection_tests {
         assert!(selected_categories("che tempo fa a Roma").contains(&"weather"));
         assert!(selected_categories("elenca i file nella cartella").contains(&"files"));
         assert!(selected_categories("prendi nota della spesa").contains(&"notes"));
+        // POSIZIONE (my_location): senza queste forme il tool non entra nel prompt e il modello
+        // tira a indovinare la città invece di leggere quella rilevata dal dispositivo.
+        for q in ["dove siamo?", "in che città siamo", "dove mi trovo adesso", "che città è questa"] {
+            assert!(selected_categories(q).contains(&"weather"), "posizione non instradata: {q:?}");
+        }
     }
 
     #[test]
@@ -589,6 +766,33 @@ mod selection_tests {
         assert!(selected_categories("puoi dirmi il tempo per domani?").contains(&"weather"));
         assert!(selected_categories("com'è il tempo a Bari?").contains(&"weather"));
         assert!(selected_categories("domani fa caldo?").contains(&"weather"));
+    }
+
+    #[test]
+    fn lookup_azienda_e_attualita_vanno_su_web() {
+        // caso reale app: chiesto "cosa fa la ditta X" / "di cosa si occupa Y" il modello INVENTAVA
+        // l'attività perché web_search non era nel prompt. Questi frasari naturali DEVONO dare web.
+        assert!(selected_categories("cosa fa la ditta Volt600?").contains(&"web"));
+        assert!(selected_categories("di cosa si occupa la Brandelli di Carpi?").contains(&"web"));
+        assert!(selected_categories("sai dirmi che lavoro fa la Cerboni Srl?").contains(&"web"));
+        assert!(selected_categories("che roba è tecnofil.it?").contains(&"web"));
+        assert!(selected_categories("che succede nel mondo oggi?").contains(&"web"));
+        assert!(selected_categories("quando è il prossimo derby?").contains(&"web"));
+        // NON deve rubare le conversazioni pure: "come stai" resta core-only
+        assert_eq!(selected_categories("come stai oggi?"), vec!["core"]);
+    }
+
+    #[test]
+    fn meteo_attuale_e_recall_note_naturali() {
+        // frasari REALI che prima non instradavano → il modello, senza tool nel prompt, inventava.
+        for r in ["piove a Milano oggi?", "com'è fuori a Udine?", "che aria tira a Lecce?",
+                  "posso stendere i panni a Pescara?", "com'è il cielo ad Ancona adesso?", "piove a Bari?"] {
+            assert!(selected_categories(r).contains(&"weather"), "weather per {r:?}");
+        }
+        assert!(selected_categories("dove avevo parcheggiato ieri?").contains(&"notes"));
+        assert!(selected_categories("guarda un po' cosa fanno alla Ottica Faretti").contains(&"web"));
+        // niente falsi positivi grossolani su conversazione pura
+        assert_eq!(selected_categories("che bella giornata, no?"), vec!["core"]);
     }
 
     #[test]
@@ -636,17 +840,7 @@ mod selection_tests {
 
     #[test]
     fn tool_call_grammar_accoppia_nome_e_argomenti() {
-        use crate::core::calendar::Calendar;
-        use crate::core::crypto::Crypto;
-        use crate::core::email::EmailStore;
-        use crate::core::memory::Memory;
-        use std::sync::{Arc, Mutex};
-        let crypto = Arc::new(Crypto::from_key(&[9u8; 32]));
-        let mem = Arc::new(Memory::open(":memory:", crypto.clone()).unwrap());
-        let email = Arc::new(EmailStore::open(":memory:", crypto.clone()).unwrap());
-        let cal = Arc::new(Calendar::open(":memory:", crypto).unwrap());
-        let pending = Arc::new(Mutex::new(None));
-        let g = ToolRegistry::build(email, pending, cal, mem).tool_call_grammar();
+        let g = test_registry(9).tool_call_grammar();
 
         // ANTI-REGRESSIONE #1: la regola di calendar_add DEVE richiedere title+when (non object generico),
         // così il modello non può emettere {"name":"calendar_add","arguments":{}} → tool che fallisce.
@@ -663,16 +857,7 @@ mod selection_tests {
         // weather è chiamato nei gold ANCHE con args vuoti {} (posizione corrente, 10 esempi):
         // la sua regola args DEVE essere `object` generico, non forzare `location` → se un domani
         // qualcuno mette location required su Weather, questo test salta PRIMA di rompere il training.
-        use crate::core::calendar::Calendar;
-        use crate::core::crypto::Crypto;
-        use crate::core::email::EmailStore;
-        use crate::core::memory::Memory;
-        use std::sync::{Arc, Mutex};
-        let crypto = Arc::new(Crypto::from_key(&[5u8; 32]));
-        let mem = Arc::new(Memory::open(":memory:", crypto.clone()).unwrap());
-        let email = Arc::new(EmailStore::open(":memory:", crypto.clone()).unwrap());
-        let cal = Arc::new(Calendar::open(":memory:", crypto).unwrap());
-        let g = ToolRegistry::build(email, Arc::new(Mutex::new(None)), cal, mem).tool_call_grammar();
+        let g = test_registry(5).tool_call_grammar();
         let w = g.lines().find(|l| l.contains(r#"\"weather\""#)).expect("regola weather");
         assert!(w.trim_end().ends_with("object"), "weather → args object generico (accetta {{}} dei gold)");
         // calendar_add: i gold emettono {title, when} in QUEST'ordine = ordine `required` dello schema
@@ -684,16 +869,7 @@ mod selection_tests {
 
     #[test]
     fn grammar_routed_contiene_solo_i_tool_pertinenti() {
-        use crate::core::calendar::Calendar;
-        use crate::core::crypto::Crypto;
-        use crate::core::email::EmailStore;
-        use crate::core::memory::Memory;
-        use std::sync::{Arc, Mutex};
-        let crypto = Arc::new(Crypto::from_key(&[7u8; 32]));
-        let mem = Arc::new(Memory::open(":memory:", crypto.clone()).unwrap());
-        let email = Arc::new(EmailStore::open(":memory:", crypto.clone()).unwrap());
-        let cal = Arc::new(Calendar::open(":memory:", crypto).unwrap());
-        let reg = ToolRegistry::build(email, Arc::new(Mutex::new(None)), cal, mem);
+        let reg = test_registry(7);
 
         // 🔑 il punto: per una richiesta meteo, la grammatica ammette weather (+ core) ma NON email,
         // agenda, file, peer, telefono → il modello NON PUÒ emettere un tool fuori contesto.
@@ -707,6 +883,30 @@ mod selection_tests {
         let gc = reg.tool_call_grammar_for("ciao, come stai?");
         assert!(gc.contains(r#"\"calculator\""#));
         assert!(!gc.contains(r#"\"web_search\""#) && !gc.contains(r#"\"email_recent\""#));
+        // rubrica: "che numero ha marco" → la famiglia phone COMPLETA (contact_search + sms_*),
+        // ma NON email/meteo
+        let gr = reg.tool_call_grammar_for("che numero ha marco?");
+        assert!(gr.contains(r#"\"contact_search\""#) && gr.contains(r#"\"phone_call\""#));
+        assert!(gr.contains(r#"\"sms_recent\""#) && gr.contains(r#"\"sms_search\""#));
+        assert!(!gr.contains(r#"\"email_recent\""#) && !gr.contains(r#"\"weather\""#));
+    }
+
+    #[test]
+    fn phone_call_risolve_nome_con_omonimia_e_non_trovato() {
+        // ANTI-REGRESSIONE fetta 4: "chiama marco" con due Marco in rubrica NON deve comporre nulla
+        // ma elencare gli omonimi e chiedere; un nome sconosciuto deve spiegare che non è in rubrica.
+        let contacts = Arc::new(Contacts::open(":memory:", Arc::new(crate::core::crypto::Crypto::from_key(&[13u8; 32]))).unwrap());
+        contacts
+            .import(&[
+                ("Marco Rossi".into(), "3330000001".into()),
+                ("Marco Bianchi".into(), "3330000002".into()),
+            ])
+            .unwrap();
+        let call = super::super::builtin::PhoneCall { contacts };
+        let due = call.execute(&json!({ "number": "marco" })).unwrap();
+        assert!(due.contains("Marco Rossi") && due.contains("Marco Bianchi") && due.contains("quale"));
+        let zero = call.execute(&json!({ "number": "giuseppe" })).unwrap();
+        assert!(zero.contains("non è nella rubrica"));
     }
 
     // ── #4: validazione argomenti per-schema (tutti i dialetti, prima del dispatch) ────────
@@ -744,19 +944,48 @@ mod selection_tests {
     fn validate_args_via_registry_blocca_calendar_add_vuoto() {
         // ANTI-REGRESSIONE #1/#4: il buco originale — calendar_add senza title/when — ora è bloccato
         // a runtime (oltre che dalla grammatica), quindi vale ANCHE per Gemma e per l'MCP.
-        use crate::core::calendar::Calendar;
-        use crate::core::crypto::Crypto;
-        use crate::core::email::EmailStore;
-        use crate::core::memory::Memory;
-        use std::sync::{Arc, Mutex};
-        let crypto = Arc::new(Crypto::from_key(&[8u8; 32]));
-        let mem = Arc::new(Memory::open(":memory:", crypto.clone()).unwrap());
-        let email = Arc::new(EmailStore::open(":memory:", crypto.clone()).unwrap());
-        let cal = Arc::new(Calendar::open(":memory:", crypto).unwrap());
-        let reg = ToolRegistry::build(email, Arc::new(Mutex::new(None)), cal, mem);
+        let reg = test_registry(8);
         let err = reg.execute("calendar_add", &serde_json::json!({})).unwrap_err();
         assert!(err.to_string().contains("obbligatorio"), "calendar_add vuoto deve fallire con errore chiaro");
         // datetime non ha required → passa con {}
         assert!(reg.execute("datetime", &serde_json::json!({})).is_ok());
+    }
+
+    #[test]
+    fn frasari_naturali_instradano_alla_famiglia_giusta() {
+        // ANTI-REGRESSIONE (2026-07): il gold aveva il 36% di esempi con un tool NON instradato dalla
+        // richiesta → a runtime il tool non era nel prompt e il modello NON poteva chiamarlo (causa #1 di
+        // "non usa i tool"). Espansione keyword: questi frasari NATURALI devono attivare la famiglia.
+        let sel = selected_categories;
+        // calendar: verbi del fissare/spostare/annullare, non solo "appuntamento"
+        for r in ["segnami il controllo dal dentista martedì", "fissami la visita tra due settimane",
+                  "aggiungi la partita di calcetto giovedì alle 20:30", "mettimi la palestra lunedì alle 19",
+                  "annulla il pranzo con Marco di domani", "che ho domani?", "riprogramma la visita al 10"] {
+            assert!(sel(r).contains(&"calendar"), "calendar per {r:?}");
+        }
+        // notes (memoria fatti): dettatura e richiamo
+        for r in ["ricordati che il codice del cancello è 4718", "il mio codice fiscale è RSSMRA85M01H501Z",
+                  "mi ricordi il codice fiscale?", "tieni a mente che sono allergico ai crostacei",
+                  "come si chiamava quel ristorante?", "aggiorna la nota del numero di mia madre"] {
+            assert!(sel(r).contains(&"notes"), "notes per {r:?}");
+        }
+        // weather+set_location: comunicare la posizione
+        for r in ["sono a Firenze per lavoro", "da oggi mi trovo a Bologna", "imposta come mia città Lecce",
+                  "spostami a Parma", "sono in vacanza a Rimini"] {
+            assert!(sel(r).contains(&"weather"), "weather per {r:?}");
+        }
+        // files: apertura/lettura/documenti
+        for r in ["apri la ricetta della carbonara", "leggimi il manuale della lavatrice",
+                  "dove ho salvato il contratto?", "fammi vedere cosa c'è sul desktop"] {
+            assert!(sel(r).contains(&"files"), "files per {r:?}");
+        }
+        // peer-scheduling → co-seleziona calendar (controlla l'agenda prima di proporre)
+        let p = sel("Proponi al Liara di Sara (id sara_p8) di vederci domenica alle 11");
+        assert!(p.contains(&"peer") && p.contains(&"calendar"), "peer+calendar per proponi-slot");
+        // INVARIANTE anti-crash: un saluto resta SOLO core (nessun frasario nuovo lo sporca).
+        // NB: non uso "grazie" — la fuzzy PRE-ESISTENTE matcha "grazie"~"gradi" (weather); quirk noto,
+        // non introdotto qui e a basso impatto (2 spec in più), fuori scope dell'espansione keyword.
+        assert_eq!(sel("ciao, come stai?"), vec!["core"]);
+        assert_eq!(sel("buongiorno"), vec!["core"]);
     }
 }

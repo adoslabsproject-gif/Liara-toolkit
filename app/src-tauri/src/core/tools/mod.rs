@@ -3,7 +3,7 @@
 //! for GBNF hardening. External MCP servers plug into the same registry later.
 pub(crate) mod builtin; // geocode (weather) riusato da commands::memory::set_manual_location
 mod registry;
-pub use registry::ToolRegistry;
+pub use registry::{selected_categories, ToolRegistry};
 
 use anyhow::Result;
 use serde_json::Value;

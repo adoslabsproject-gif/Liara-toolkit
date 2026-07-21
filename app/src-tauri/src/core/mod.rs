@@ -4,6 +4,7 @@ pub mod agent;
 pub mod android_ctx;
 pub mod audio;
 pub mod calendar;
+pub mod contacts;
 pub mod crypto;
 pub mod email;
 #[cfg(test)]
@@ -12,6 +13,7 @@ pub mod extract;
 pub mod mcp;
 pub mod paths;
 pub mod peer;
+pub mod sms;
 pub mod engine;
 pub mod memory;
 pub mod tools;
