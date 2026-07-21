@@ -189,7 +189,8 @@ static CATEGORY_KEYWORDS: &[(&str, &[&str])] = &[
                 "scrivi su", "salva nel file", "elimina il", "cancella il", "sposta", "rinomina",
                 "apri ", "leggimi", "leggi il", "leggi la", "leggi i", "leggi le", "leggi ", "checklist",
                 "il manuale", "il diario", "la ricetta", "la lista", "il contratto", "elimina",
-                "scompatt", "aggiungi al diario", "dove ho salvato", "sul computer", "sul desktop",
+                "scompatt", "aggiungi al diario", "dove ho salvato il file", "dove ho salvato il document",
+                "dove ho salvato il pdf", "dove ho salvato la foto", "sul computer", "sul desktop",
                 "sulla scrivania", "dalla scrivania", "fammi vedere", "trova le foto", "trova il",
                 "trova la", "trova e", "il backup", "le foto del", "la bolletta", "il curriculum",
                 "il libretto", "cancellalo", "idee della festa", "budget", "cancella la", "cancella lo",
@@ -235,8 +236,9 @@ static CATEGORY_KEYWORDS: &[(&str, &[&str])] = &[
               "elettricist", "farmaci", "farmacia", "dottore", "medico", "ospedale", "hotel",
               "voli", "treno", "treni", "ricetta", "a che ora gioca", "meglio comprare", "quanto si prende",
               "quanto ci mette", "che documenti servono", "dammi il telefono", "che ore sono a",
-              "proponimi qualcosa", "qualcosa da fare", "cosa fare", "l'articolo", "articolo più",
-              "notizie del giorno",
+              "proponimi qualcosa", "qualcosa da fare", "cosa fare", "cosa c'è da fare", "cosa c'e da fare",
+              "cosa c'è da vedere", "che c'è da fare", "cosa si fa", "eventi", "sagre", "concerti",
+              "l'articolo", "articolo più", "notizie del giorno",
               // LOOKUP AZIENDA/ATTIVITÀ (caso reale app): "cosa fa la ditta X", "di cosa si occupa Y",
               // "che lavoro fa Z" → senza web_search il modello INVENTAVA l'attività. + attualità
               // generica ("che succede nel mondo") e sport ("prossimo derby") che vanno via web.
@@ -273,7 +275,11 @@ static CATEGORY_KEYWORDS: &[(&str, &[&str])] = &[
                   // set_location, qui le forme al PLURALE e le domande sulla città/zona — senza,
                   // "dove siamo?" non portava il tool nel prompt e il modello tirava a indovinare.
                   "dove siamo", "in che città", "che città", "in quale città", "posizione",
-                  "qui vicino", "in che zona", "dove ci troviamo", "località"]),
+                  "qui vicino", "in che zona", "dove ci troviamo", "località",
+                  // POSIZIONE contestuale per eventi/ricerche "qui" (my_location → poi web_search):
+                  // "cosa fare qui/nelle vicinanze" deve portare ANCHE my_location (dove sono) nel prompt.
+                  "nelle vicinanze", "nei dintorni", "nei paraggi", "qua vicino", "da fare qui",
+                  "fare qui", "vedere qui", "stasera qui", "qui in zona"]),
 ];
 
 pub fn selected_categories(request: &str) -> Vec<&'static str> {
@@ -790,6 +796,11 @@ mod selection_tests {
             assert!(selected_categories(r).contains(&"weather"), "weather per {r:?}");
         }
         assert!(selected_categories("dove avevo parcheggiato ieri?").contains(&"notes"));
+        // "dove ho salvato [password/codice/pin]" = INFO PERSONALE → notes, NON files (il red-team 7/21
+        // trovava fs_search: "dove ho salvato" generico era in files; ora ristretto ai file-veri).
+        assert!(selected_categories("dove ho salvato la password del wifi?").contains(&"notes"));
+        assert!(!selected_categories("dove ho salvato la password del wifi?").contains(&"files"));
+        assert!(selected_categories("dove ho salvato il file relazione?").contains(&"files"));
         assert!(selected_categories("guarda un po' cosa fanno alla Ottica Faretti").contains(&"web"));
         // niente falsi positivi grossolani su conversazione pura
         assert_eq!(selected_categories("che bella giornata, no?"), vec!["core"]);

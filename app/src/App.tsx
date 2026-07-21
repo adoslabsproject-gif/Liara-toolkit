@@ -457,6 +457,11 @@ export default function App() {
     streamTarget.current = assistantId;
     speakBuf.current = "";
     if (autoSpeakRef.current) stopSpeak(); // clear any leftover speech before the new turn
+    // 🔴 FIX "Liara non disponibile dopo Stop": uno Stop lascia in cronologia un turno assistant
+    // VUOTO (la risposta interrotta). Inviarlo al cloud fa rispondere al server "momentaneamente
+    // non disponibile" (rifiuta il turno assistant vuoto). Filtriamo i turni assistant senza testo
+    // PRIMA di inviare: due user consecutivi il modello li gestisce, un assistant vuoto no.
+    messages = messages.filter((m) => !(m.role === "assistant" && !(m.content ?? "").trim()));
     try {
       // Cloud → il 24B via API (stessa firma + stessi eventi token/done/tool del locale, streaming
       // identico); i tool_call che il 24B restituisce vengono eseguiti in LOCALE dal backend. `image`

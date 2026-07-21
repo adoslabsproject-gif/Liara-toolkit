@@ -353,11 +353,30 @@ pub async fn remote_generate(
                 facts.join("\n- ")
             )
         };
-        let system = format!("{}{}{}", CLOUD_SYSTEM_PROMPT, memory.profile_block(), mem_block);
+        // Data/ora correnti IN TESTA al system, come fa il locale (agent_loop.rs): senza, il cloud
+        // sui fatti temporali (sport, notizie) si affida al pre-training e allucina ("finale il 18
+        // luglio"). Riuso l'OUTPUT del tool `datetime` → stringa IDENTICA a quella del locale (stesso
+        // formato italiano "giovedì 21 luglio 2026, ore 14:30 (21/07/2026)") → coerenza tra i due path.
+        // NB (curatrice): il dataset del 24B non ha ancora il date-prefix → lieve train≠runtime sul
+        // primo rigo finché non si rigenera il training cloud con ADD_DATE_PREFIX.
+        let now = tools.execute("datetime", &json!({})).unwrap_or_default();
+        let system = format!(
+            "Data e ora correnti: {now}.\n{}{}{}",
+            CLOUD_SYSTEM_PROMPT,
+            memory.profile_block(),
+            mem_block
+        );
         let mut msgs: Vec<Value> = vec![json!({ "role": "system", "content": system })];
         // Se c'è un'immagine, va sull'ULTIMO messaggio utente in formato OpenAI vision (content = array
         // [testo, image_url]) — il 32B è Qwen3-VL e la legge (verificato: descrive l'immagine). Gli altri
         // messaggi restano testo semplice.
+        // Difesa in profondità (oltre al filtro nel frontend): SCARTA i turni assistant VUOTI. Uno
+        // Stop lascia una risposta interrotta a contenuto vuoto; il server la rifiuta con
+        // "momentaneamente non disponibile". Un turno assistant senza testo non porta informazione.
+        let messages: Vec<Message> = messages
+            .into_iter()
+            .filter(|m| !(m.role == "assistant" && m.content.trim().is_empty()))
+            .collect();
         let last_user_idx = messages.iter().rposition(|m| m.role == "user");
         for (i, m) in messages.iter().enumerate() {
             if image.is_some() && Some(i) == last_user_idx {
