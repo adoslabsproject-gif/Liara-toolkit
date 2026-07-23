@@ -9,8 +9,12 @@
 import { invoke } from "@tauri-apps/api/core";
 
 export type Contact = { id: string; name: string; added: number };
-export type ChatMsg = { dir: "me" | "peer"; text: string; ts: number; doc?: { name: string; text: string } };
-type Stored = { dir: "me" | "peer"; payload: string; ts: number };
+// Stato di consegna, stile messaggistica: sent = partito/in coda (✓), delivered = il relay l'ha
+// consegnato al destinatario online (✓✓), read = il destinatario ha aperto la chat (✓✓ blu).
+// Vale solo per i MIEI messaggi (dir === "me").
+export type MsgStatus = "sent" | "delivered" | "read";
+export type ChatMsg = { dir: "me" | "peer"; text: string; ts: number; id: string; status?: MsgStatus; doc?: { name: string; text: string }; photo?: { name: string; dataUrl: string } };
+type Stored = { dir: "me" | "peer"; payload: string; ts: number; id: string; status?: MsgStatus };
 export type NetStatus = "off" | "connecting" | "on";
 
 // Un messaggio-documento viaggia nello STESSO canale cifrato di un testo, marcato da un sentinella
@@ -20,10 +24,23 @@ export type NetStatus = "off" | "connecting" | "on";
 // messaggio → il testo è capato lato UI (vedi PeerHub). Retro-compatibile: i messaggi senza sentinella
 // restano testo normale.
 const DOC_SENTINEL = "DOC";
+// Foto: come i documenti ma il "corpo" è un dataURL immagine (già RIDIMENSIONATO lato UI per stare
+// sotto i 256KB del relay → niente CDN). Sentinella distinta → la mostriamo come IMMAGINE apribile.
+const PHOTO_SENTINEL = String.fromCharCode(1) + "IMG" + String.fromCharCode(1);
+export function makePhotoPlaintext(name: string, dataUrl: string): string {
+  return PHOTO_SENTINEL + name + String.fromCharCode(1) + dataUrl;
+}
 export function makeDocPlaintext(name: string, text: string): string {
   return DOC_SENTINEL + name + "" + text;
 }
-function parsePlaintext(raw: string): { text: string; doc?: { name: string; text: string } } {
+function parsePlaintext(raw: string): { text: string; doc?: { name: string; text: string }; photo?: { name: string; dataUrl: string } } {
+  if (raw.startsWith(PHOTO_SENTINEL)) {
+    const rest = raw.slice(PHOTO_SENTINEL.length);
+    const i = rest.indexOf(String.fromCharCode(1));
+    const name = i >= 0 ? rest.slice(0, i) : "foto";
+    const dataUrl = i >= 0 ? rest.slice(i + 1) : "";
+    return { text: `🖼 ${name}`, photo: { name, dataUrl } };
+  }
   if (raw.startsWith(DOC_SENTINEL)) {
     const rest = raw.slice(DOC_SENTINEL.length);
     const i = rest.indexOf("");
@@ -119,8 +136,13 @@ export async function loadHistory(id: string): Promise<ChatMsg[]> {
   for (const s of stored) {
     try {
       const raw = await invoke<string>("peer_open", { peerId: id, payload: s.payload });
+      // MAI mostrare i messaggi di CONTROLLO in chat (READ/INVITE/ACCEPT/TASK o futuri sconosciuti):
+      // iniziano tutti col char \001 (SOH), improbabile in un testo umano. L'unico control "visibile"
+      // è il DOC (allegato). Filtro qui → sparisce anche la spazzatura già finita nello storico da un
+      // client vecchio (es. "☒READ☒[...]") e regge il disallineamento di versione tra i due Liara.
+      if (raw.charCodeAt(0) === 1 && !raw.startsWith(DOC_SENTINEL)) continue;
       const p = parsePlaintext(raw);
-      out.push({ dir: s.dir, text: p.text, ts: s.ts, doc: p.doc });
+      out.push({ dir: s.dir, text: p.text, ts: s.ts, id: s.id, status: s.status, doc: p.doc, photo: p.photo });
     } catch { /* payload non apribile → salta */ }
   }
   return out;
@@ -137,6 +159,47 @@ export function unreadCount(id: string): number { return loadUnread()[id] || 0; 
 export function totalUnread(): number { return Object.values(loadUnread()).reduce((a, b) => a + b, 0); }
 export function clearUnread(id: string) { const u = loadUnread(); delete u[id]; saveUnread(u); emit(); }
 
+// ---- stato messaggi (spunte) + ricevute di lettura -----------------------
+const READ_SENTINEL = String.fromCharCode(1) + "READ" + String.fromCharCode(1);
+const READHW_KEY = "liara_readhw"; // ts dell'ultimo msg del contatto per cui ho già mandato la ricevuta
+
+// id breve per-messaggio: lega l'ack del relay e la ricevuta di lettura AL messaggio giusto.
+function genMsgId(): string {
+  return Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+}
+
+// Aggiorna lo stato di un mio messaggio (per id). Non declassa MAI (read > delivered > sent): un ack
+// tardivo non deve spegnere una spunta di lettura già arrivata.
+const STATUS_RANK: Record<MsgStatus, number> = { sent: 0, delivered: 1, read: 2 };
+function setMsgStatus(peerId: string, id: string, status: MsgStatus) {
+  const all = loadStored(peerId);
+  let changed = false;
+  for (const m of all) {
+    if (m.dir === "me" && m.id === id && STATUS_RANK[status] > STATUS_RANK[m.status ?? "sent"]) {
+      m.status = status; changed = true;
+    }
+  }
+  if (changed) { try { localStorage.setItem(HIST_KEY(peerId), JSON.stringify(all)); } catch { /* */ } emit(); }
+}
+
+function loadReadHw(): Record<string, number> {
+  try { return JSON.parse(localStorage.getItem(READHW_KEY) || "{}"); } catch { return {}; }
+}
+// Manda al contatto la ricevuta di lettura per i SUOI messaggi non ancora confermati (ts > highwater).
+// Chiamata quando apro la sua chat (setActiveChat) e quando arriva un nuovo suo msg mentre la guardo.
+async function sendReadReceipts(peerId: string): Promise<void> {
+  const hw = loadReadHw();
+  const since = hw[peerId] || 0;
+  const fresh = loadStored(peerId).filter((m) => m.dir === "peer" && m.ts > since && m.id);
+  if (fresh.length === 0) return;
+  const ids = fresh.map((m) => m.id);
+  const ok = await sendControl(peerId, READ_SENTINEL + JSON.stringify(ids)).catch(() => false);
+  if (ok) {
+    hw[peerId] = Math.max(since, ...fresh.map((m) => m.ts));
+    try { localStorage.setItem(READHW_KEY, JSON.stringify(hw)); } catch { /* */ }
+  }
+}
+
 // ---- pub/sub -------------------------------------------------------------
 type Listener = () => void;
 const listeners = new Set<Listener>();
@@ -150,7 +213,7 @@ let status: NetStatus = "off";
 let activeChat: string | null = null; // se sto guardando la chat di questo id, non conta come "non letto"
 
 export function getStatus(): NetStatus { return status; }
-export function setActiveChat(id: string | null) { activeChat = id; if (id) clearUnread(id); }
+export function setActiveChat(id: string | null) { activeChat = id; if (id) { clearUnread(id); sendReadReceipts(id).catch(() => {}); } }
 
 /// Apre (o riapre) la connessione al relay e registra il mio ID. Idempotente.
 export async function connect(): Promise<void> {
@@ -164,11 +227,17 @@ export async function connect(): Promise<void> {
   ws = sock;
   sock.onopen = () => sock.send(JSON.stringify({ type: "register", id: myId }));
   sock.onmessage = async (e) => {
-    let m: { type?: string; from?: string; body?: unknown };
+    let m: { type?: string; from?: string; to?: string; body?: unknown; id?: string; delivered?: boolean };
     try { m = JSON.parse(e.data); } catch { return; }
     if (m.type === "registered") { status = "on"; emit(); return; }
+    // ACK del relay per un MIO messaggio: delivered=true → consegnato (✓✓), false → solo accodato (✓)
+    if (m.type === "ack" && typeof m.to === "string" && typeof m.id === "string") {
+      setMsgStatus(m.to, m.id, m.delivered ? "delivered" : "sent");
+      return;
+    }
     if (m.type === "msg" && typeof m.from === "string" && typeof m.body === "string") {
       const from = m.from, payload = m.body as string, ts = Date.now();
+      const msgId = typeof m.id === "string" && m.id ? m.id : genMsgId();
       if (from === myId) return; // ignora i messaggi/inviti da SE STESSI (test con un solo device)
       // Decifra per CLASSIFICARE (invito / accetta / messaggio). Non apribile → scarta.
       let text: string;
@@ -190,9 +259,18 @@ export async function connect(): Promise<void> {
         emit();
         return;
       }
+      if (text.startsWith(READ_SENTINEL)) {
+        // il peer ha LETTO i miei messaggi → segna "read" (✓✓ blu) quelli con gli id indicati
+        try { (JSON.parse(text.slice(READ_SENTINEL.length)) as string[]).forEach((id) => setMsgStatus(from, id, "read")); } catch { /* */ }
+        return;
+      }
       // messaggio normale → conserva il ciphertext (cifrato a riposo) + segna non letto
-      pushStored(from, { dir: "peer", payload, ts });
-      if (activeChat !== from) { const u = loadUnread(); u[from] = (u[from] || 0) + 1; saveUnread(u); }
+      pushStored(from, { dir: "peer", payload, ts, id: msgId });
+      if (activeChat !== from) {
+        const u = loadUnread(); u[from] = (u[from] || 0) + 1; saveUnread(u);
+      } else {
+        sendReadReceipts(from).catch(() => {}); // sto guardando la chat → conferma subito la lettura
+      }
       emit();
     }
   };
@@ -208,8 +286,10 @@ async function sealSend(peerId: string, plaintext: string): Promise<boolean> {
   try { payload = await invoke<string>("peer_seal", { peerId, text: plaintext }); } catch { return false; }
   if (!ws || ws.readyState !== WebSocket.OPEN) { await connect(); }
   if (!ws || ws.readyState !== WebSocket.OPEN) return false;
-  ws.send(JSON.stringify({ type: "send", to: peerId, body: payload }));
-  pushStored(peerId, { dir: "me", payload, ts: Date.now() });
+  // id per-messaggio: il relay lo rimanda nell'ack (✓✓ consegnato) e il peer nella ricevuta (✓✓ letto)
+  const id = genMsgId();
+  ws.send(JSON.stringify({ type: "send", to: peerId, body: payload, id }));
+  pushStored(peerId, { dir: "me", payload, ts: Date.now(), id, status: "sent" });
   emit();
   return true;
 }
@@ -224,6 +304,11 @@ export async function sendTo(peerId: string, text: string): Promise<boolean> {
 /// Invia un DOCUMENTO (nome + testo estratto) sullo stesso canale E2E → il Liara dell'altro potrà leggerlo.
 export async function sendDoc(peerId: string, name: string, text: string): Promise<boolean> {
   return sealSend(peerId, makeDocPlaintext(name, text));
+}
+
+/// Invia una FOTO (nome + dataURL già ridimensionato) sullo stesso canale E2E → il peer la vede.
+export async function sendPhoto(peerId: string, name: string, dataUrl: string): Promise<boolean> {
+  return sealSend(peerId, makePhotoPlaintext(name, dataUrl));
 }
 
 /// Invia un messaggio di CONTROLLO (invito/accetta) — sealed E2E ma SENZA finire nello storico chat.

@@ -136,6 +136,27 @@ fn boot_log(dir: &std::path::Path, msg: &str) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 🔴 CRASH "l'app muore da sola" (tombstone SIGABRT, 2026-07-21): quando Android DISTRUGGE
+    // l'activity (app in background, o Samsung che la ricicla — molto più frequente a telefono
+    // STACCATO/non in carica), `tao::EventLoop::run` chiama `std::process::exit`, che esegue i
+    // distruttori C++ globali (`__cxa_finalize`); questi distruggono un mutex ancora DETENUTO da un
+    // thread di background (audio/warmup/ureq/webview) → bionic aborta con "destroying mutex with
+    // owner or contenders" → crash. Il processo sta comunque terminando (activity distrutta): quindi
+    // convertiamo quell'abort di teardown in un'uscita PULITA con `_exit(0)` (che NON esegue i
+    // distruttori C++). Niente più tombstone: l'app si chiude netta e riparte pulita alla riapertura.
+    // Solo Android; sul desktop l'uscita dura è già gestita in on_window_event/ExitRequested.
+    #[cfg(target_os = "android")]
+    unsafe {
+        extern "C" {
+            fn signal(signum: i32, handler: usize) -> usize;
+            fn _exit(code: i32) -> !;
+        }
+        extern "C" fn on_abort(_sig: i32) {
+            unsafe { _exit(0) }
+        }
+        const SIGABRT: i32 = 6;
+        signal(SIGABRT, on_abort as usize);
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {

@@ -9,11 +9,44 @@ import QRCode from "qrcode";
 import jsQR from "jsqr";
 import { t } from "./i18n";
 import {
-  Contact, ChatMsg, NetStatus, PeerRequest, Task, getStatus, connect,
-  subscribe, sendTo, sendDoc, loadHistory, unreadCount, setActiveChat, clearHistory,
+  Contact, ChatMsg, MsgStatus, NetStatus, PeerRequest, Task, getStatus, connect,
+  subscribe, sendTo, sendDoc, sendPhoto, loadHistory, unreadCount, setActiveChat, clearHistory,
   sendInvite, pendingRequests, acceptRequest, rejectRequest,
   getTask, setTask, sendTask, materialsText,
 } from "./peer";
+
+// Ridimensiona un'immagine (canvas) sotto una dimensione massima e la ricomprime JPEG: serve a far
+// stare la foto sotto i 256KB/messaggio del relay SENZA CDN. Ritorna un dataURL JPEG.
+function downscaleImage(dataUrl: string, maxDim: number, quality: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      let { width, height } = img;
+      const m = Math.max(width, height);
+      if (m > maxDim) { const s = maxDim / m; width = Math.round(width * s); height = Math.round(height * s); }
+      const canvas = document.createElement("canvas");
+      canvas.width = width; canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) { reject(new Error("canvas")); return; }
+      ctx.drawImage(img, 0, 0, width, height);
+      resolve(canvas.toDataURL("image/jpeg", quality));
+    };
+    img.onerror = () => reject(new Error("img"));
+    img.src = dataUrl;
+  });
+}
+
+// Orario del messaggio (HH:MM), stile messaggistica.
+function fmtTime(ts: number): string {
+  const d = new Date(ts);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+// Spunta di stato per i MIEI messaggi: ✓ inviato/in coda, ✓✓ consegnato, ✓✓ blu letto.
+function Tick({ status }: { status?: MsgStatus }) {
+  if (status === "read") return <span className="tick read" title={t("Letto", "Read")}>✓✓</span>;
+  if (status === "delivered") return <span className="tick" title={t("Consegnato", "Delivered")}>✓✓</span>;
+  return <span className="tick" title={t("Inviato", "Sent")}>✓</span>;
+}
 
 const DOC_MAX = 120 * 1024; // cap del testo condiviso: sta sotto il limite 256KB/messaggio del relay
 
@@ -375,8 +408,8 @@ function ChatView({ contact, onBack }: { contact: Contact; onBack: () => void })
     replyingRef.current = true; setAiThinking(true);
     try {
       const opener: [string, string][] = [["peer", task.goal
-        ? `Ciao! Sono il Liara di un'altra persona. Coordiniamoci su questo obiettivo: ${task.goal}`
-        : "Ciao! Sono il Liara di un'altra persona: presentati e conosciamoci."]];
+        ? `Sono il Liara di un'altra persona. L'obiettivo condiviso è: ${task.goal}. Parti tu col primo passo concreto, senza convenevoli.`
+        : "Ciao! Sono il Liara di un'altra persona: due parole di presentazione e vediamo se abbiamo cose in comune."]];
       const reply = await genReply(opener);
       await sendTo(contact.id, reply); reload();
     } catch { /* */ } finally { replyingRef.current = false; setAiThinking(false); }
@@ -440,6 +473,27 @@ function ChatView({ contact, onBack }: { contact: Contact; onBack: () => void })
     reader.readAsText(file);
   };
 
+  // Allega una FOTO: la leggo, la RIDIMENSIONO finché sta sotto ~200KB (per i 256KB del relay), la
+  // invio E2E. Niente CDN: la foto viaggia cifrata sullo stesso canale, ridotta quanto basta.
+  const attachPhoto = (file: File) => {
+    const reader = new FileReader();
+    reader.onload = async () => {
+      try {
+        let url = await downscaleImage(String(reader.result || ""), 1024, 0.7);
+        let dim = 1024, q = 0.7;
+        while (url.length > 200 * 1024 && dim > 360) { dim = Math.round(dim * 0.8); q = Math.max(0.4, q - 0.08); url = await downscaleImage(url, dim, q); }
+        if (url.length > 245 * 1024) { setNote(t("Immagine troppo grande anche ridotta.", "Image too large even after resizing.")); return; }
+        setSending(true);
+        const ok = await sendPhoto(contact.id, file.name, url);
+        setSending(false);
+        if (ok) { setNote(""); reload(); } else setNote(t("Invio non riuscito.", "Send failed."));
+      } catch { setSending(false); setNote(t("Immagine non leggibile.", "Unreadable image.")); }
+    };
+    reader.readAsDataURL(file);
+  };
+  const photoRef = useRef<HTMLInputElement>(null);
+  const [lightbox, setLightbox] = useState<string | null>(null); // dataURL foto a schermo intero
+
   // Ricevuto un documento → ingest nella RAG locale col MODELLO: da qui il mio Liara può discuterne.
   const ingest = async (key: string, name: string, text: string) => {
     setIngested((s) => ({ ...s, [key]: "busy" }));
@@ -489,6 +543,14 @@ function ChatView({ contact, onBack }: { contact: Contact; onBack: () => void })
       <div className="chat-scroll">
         {msgs.length === 0 && <p className="hint">🔒 {t("Chat cifrata end-to-end. Scrivi il primo messaggio.", "End-to-end encrypted chat. Send the first message.")}</p>}
         {msgs.map((m, i) => {
+          if (m.photo) {
+            return (
+              <div key={i} className={`bubble ${m.dir} photobub`}>
+                <img src={m.photo.dataUrl} alt={m.photo.name} className="chatphoto" onClick={() => setLightbox(m.photo!.dataUrl)} />
+                <div className="bubmeta">{fmtTime(m.ts)}{m.dir === "me" && <Tick status={m.status} />}</div>
+              </div>
+            );
+          }
           if (m.doc) {
             const key = `${i}-${m.ts}`;
             const st = ingested[key];
@@ -502,22 +564,35 @@ function ChatView({ contact, onBack }: { contact: Contact; onBack: () => void })
                         {st === "busy" ? t("Leggo…", "Reading…") : `🧠 ${t("Fallo leggere a Liara", "Let Liara read it")}`}
                       </button>
                 )}
-                {m.dir === "me" && <div className="dochint">{t("inviato", "sent")}</div>}
+                <div className="bubmeta">{fmtTime(m.ts)}{m.dir === "me" && <Tick status={m.status} />}</div>
               </div>
             );
           }
-          return <div key={i} className={`bubble ${m.dir}`}>{m.text}</div>;
+          return (
+            <div key={i} className={`bubble ${m.dir}`}>
+              <span className="bubtext">{m.text}</span>
+              <span className="bubmeta">{fmtTime(m.ts)}{m.dir === "me" && <Tick status={m.status} />}</span>
+            </div>
+          );
         })}
         <div ref={endRef} />
       </div>
       {note && <p className="hint err" style={{ padding: "0 4px" }}>{note}</p>}
       <div className="peer-composer">
         <button className="ctool" title={t("Allega documento", "Attach document")} onClick={() => docRef.current?.click()} disabled={sending}>📎</button>
+        <button className="ctool" title={t("Allega foto", "Attach photo")} onClick={() => photoRef.current?.click()} disabled={sending}>🖼</button>
         <input ref={docRef} type="file" accept=".txt,.md,.csv,.json,.log,.rs,.py,.js,.ts,.html,.xml,.yaml,.yml" style={{ display: "none" }}
           onChange={(e) => { const f = e.target.files?.[0]; if (f) attachDoc(f); e.currentTarget.value = ""; }} />
+        <input ref={photoRef} type="file" accept="image/*" style={{ display: "none" }}
+          onChange={(e) => { const f = e.target.files?.[0]; if (f) attachPhoto(f); e.currentTarget.value = ""; }} />
         <input className="peer-input" placeholder={t("Messaggio…", "Message…")} value={text} onChange={(e) => setText(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") send(); }} />
         <button className="csend" onClick={send} disabled={!text.trim() || sending}>➤</button>
       </div>
+      {lightbox && (
+        <div className="lightbox" onClick={() => setLightbox(null)}>
+          <img src={lightbox} alt="" />
+        </div>
+      )}
     </>
   );
 }

@@ -286,6 +286,19 @@ body { background: var(--bg); color: var(--txt); font-family: var(--font); }
 .chat-scroll .bubble.docbub { display: flex; flex-direction: column; gap: 6px; }
 .docname { font-weight: 600; }
 .dochint { font-size: 12px; opacity: .8; }
+/* orario + spunte in fondo alla bolla (stile messaggistica): meta piccola, allineata a destra */
+.chat-scroll .bubble .bubtext { white-space: pre-wrap; word-wrap: break-word; }
+.bubmeta { display: block; margin-top: 3px; font-size: 10.5px; line-height: 1; text-align: right;
+  opacity: .75; white-space: nowrap; }
+.bubble.me .bubmeta { color: rgba(255,255,255,.85); }
+.tick { margin-left: 4px; letter-spacing: -1px; font-weight: 700; }
+.tick.read { color: #4fc3f7; } /* ✓✓ blu = letto */
+/* foto in chat: miniatura inline apribile a schermo intero */
+.chat-scroll .bubble.photobub { padding: 5px; display: flex; flex-direction: column; gap: 3px; }
+.chatphoto { max-width: 200px; max-height: 240px; border-radius: 12px; display: block; cursor: pointer; object-fit: cover; }
+.lightbox { position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,.9); display: flex;
+  align-items: center; justify-content: center; padding: 16px; }
+.lightbox img { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 8px; }
 .docbtn { background: transparent; border: 1px solid currentColor; color: inherit; border-radius: 8px;
   padding: 5px 10px; font-size: 13px; cursor: pointer; align-self: flex-start; }
 .docbtn:disabled { opacity: .6; cursor: default; }

@@ -64,12 +64,15 @@ mod tests {
 /// istruzioni" in loop; qui lo teniamo caloroso e orientato al compito.
 fn peer_system(owner: &str, shareable: &str, goal: &str, materials: &str, summary: &str) -> String {
     let goal_block = if goal.trim().is_empty() {
-        "State facendo conoscenza a nome dei vostri utenti: chiacchierate in modo cordiale e scoprite se avete cose in comune.".to_string()
+        "State facendo conoscenza a nome dei vostri utenti: due o tre battute cordiali per scoprire se avete cose in comune, \
+poi al punto. Niente convenevoli a raffica.".to_string()
     } else {
         format!(
             "OBIETTIVO di questa conversazione: {goal}\n\
-Lavora INSIEME all'altro assistente per raggiungerlo: proponi, chiedi e negozia il necessario, restando SUL compito. \
-Per fissare qualcosa di definitivo di' che lo confermerai con {owner}."
+⚡ AGISCI SUBITO per raggiungerlo. Se ci sono MATERIALI qui sotto, LEGGILI e usali ORA. Fai TU il primo passo concreto \
+verso l'obiettivo (una proposta, una bozza, i dettagli operativi) — NON chiedere 'come procediamo' né 'cosa ti serve'. \
+Fai una domanda SOLO se sei davvero bloccato su un dato indispensabile che non puoi dedurre. Niente convenevoli, niente \
+'come posso aiutarti': sei già sul compito e resti sul compito. Per fissare qualcosa di DEFINITIVO di' che lo confermerai con {owner}."
         )
     };
     let materials_block = if materials.trim().is_empty() {
