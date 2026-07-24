@@ -142,6 +142,7 @@ pub async fn liara_reply(
     history: Vec<(String, String)>,
     goal: Option<String>,
     materials: Option<String>,
+    images: Option<Vec<String>>, // dataURL delle FOTO condivise (già ridimensionate) → visione cloud
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     // se l'ultimo è mio (assistant), non c'è nulla a cui rispondere
@@ -196,6 +197,22 @@ pub async fn liara_reply(
     // messaggi in formato chat: peer→user (input), me→assistant (mie risposte precedenti).
     // Viaggia SOLO la finestra recente: il resto è nel riepilogo dentro il system.
     let mut msgs: Vec<serde_json::Value> = vec![serde_json::json!({ "role": "system", "content": system })];
+    // FOTO condivise → visione del 24B cloud (multimodale): un messaggio-contesto in formato OpenAI
+    // vision (content = [testo, image_url…]) subito dopo il system, così il modello LE VEDE e può
+    // spiegarle (prima riceveva solo "[Foto condivisa: nome]" e chiedeva cosa ci fosse). Solo cloud:
+    // il modello locale piccolo è testo-only → le foto si ignorano (niente crash).
+    if cloud {
+        if let Some(imgs) = images.as_ref().filter(|v| !v.is_empty()) {
+            let mut content = vec![serde_json::json!({
+                "type": "text",
+                "text": "Immagini condivise per il compito: guardale e usane il contenuto (testo, dati, elementi) nella conversazione."
+            })];
+            for url in imgs {
+                content.push(serde_json::json!({ "type": "image_url", "image_url": { "url": url } }));
+            }
+            msgs.push(serde_json::json!({ "role": "user", "content": content }));
+        }
+    }
     for (who, text) in &history[recent_from..] {
         let role = if who == "me" { "assistant" } else { "user" };
         msgs.push(serde_json::json!({ "role": role, "content": text }));

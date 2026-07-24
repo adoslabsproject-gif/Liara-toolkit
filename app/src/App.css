@@ -281,8 +281,11 @@ body { background: var(--bg); color: var(--txt); font-family: var(--font); }
 .chat-scroll .bubble { max-width: 78%; padding: 9px 13px; border-radius: 16px; font-size: 15px; line-height: 1.4;
   word-wrap: break-word; white-space: pre-wrap; }
 .chat-scroll .bubble.me { align-self: flex-end; background: var(--accent); color: #fff; border-bottom-right-radius: 4px; }
-.chat-scroll .bubble.peer { align-self: flex-start; background: var(--bg); border: 1px solid var(--line);
-  border-bottom-left-radius: 4px; }
+.chat-scroll .bubble.peer { align-self: flex-start; background: #2b1d4d; color: #ece8ff;
+  border: 1px solid rgba(124,92,255,.35); border-bottom-left-radius: 4px; } /* viola scuro (msg dell'altro) */
+.chat-scroll .bubble.peer .bubmeta { color: rgba(236,232,255,.7); }
+/* Liara Chat a TUTTO SCHERMO (non un drawer stretto come le altre tab) */
+.drawer.peerhub { width: 100%; max-width: 100%; border-left: none; }
 .chat-scroll .bubble.docbub { display: flex; flex-direction: column; gap: 6px; }
 .docname { font-weight: 600; }
 .dochint { font-size: 12px; opacity: .8; }

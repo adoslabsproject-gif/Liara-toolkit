@@ -73,7 +73,7 @@ export function PeerHub({ onClose }: { onClose: () => void }) {
 
   return (
     <div className="drawer-overlay" onClick={onClose}>
-      <div className="drawer" onClick={(e) => e.stopPropagation()}>
+      <div className="drawer peerhub" onClick={(e) => e.stopPropagation()}>
         {view === "chat" && chatWith ? (
           <ChatView contact={chatWith} onBack={backToList} />
         ) : view === "qr" ? (
@@ -385,7 +385,10 @@ function ChatView({ contact, onBack }: { contact: Contact; onBack: () => void })
   const aiHistory = (m: ChatMsg[]) => m.filter((x) => !x.doc).map((x) => [x.dir === "me" ? "me" : "peer", x.text] as [string, string]);
   // ogni risposta del mio Liara è guidata dall'obiettivo + materiali del task
   const genReply = (history: [string, string][]) =>
-    invoke<string>("liara_reply", { peer: contact.id, history, goal: task.goal || null, materials: materialsText(task) || null });
+    invoke<string>("liara_reply", {
+      peer: contact.id, history, goal: task.goal || null, materials: materialsText(task) || null,
+      images: task.materials.filter((m) => m.kind === "photo").map((m) => m.content), // foto → visione cloud
+    });
   useEffect(() => {
     if (!aiMode || replyingRef.current) return;
     if (msgs.length === 0) return;
@@ -436,7 +439,12 @@ function ChatView({ contact, onBack }: { contact: Contact; onBack: () => void })
   };
   const addPhotoMaterial = (file: File) => {
     const r = new FileReader();
-    r.onload = () => setTaskState((t) => ({ ...t, materials: [...t.materials, { kind: "photo", name: file.name, content: String(r.result || "") }] }));
+    r.onload = async () => {
+      // ridimensiona (canvas) prima di allegare: la foto viaggia al cloud a ogni turno → tienila leggera
+      let url = String(r.result || "");
+      try { url = await downscaleImage(url, 1024, 0.7); } catch { /* usa l'originale */ }
+      setTaskState((t) => ({ ...t, materials: [...t.materials, { kind: "photo", name: file.name, content: url }] }));
+    };
     r.readAsDataURL(file);
   };
   const removeMaterial = (i: number) => setTaskState((t) => ({ ...t, materials: t.materials.filter((_, k) => k !== i) }));
@@ -537,7 +545,7 @@ function ChatView({ contact, onBack }: { contact: Contact; onBack: () => void })
       {aiMode && !showTask && (
         <div className="ai-banner">
           🤖 {aiThinking ? t("il tuo Liara sta scrivendo…", "your Liara is typing…") : t("Coordinazione AI attiva: i Liara lavorano all'obiettivo.", "AI coordination on: the Liaras are working on the goal.")}
-          <button className="ghost aistop" onClick={() => setAiMode(false)}>{t("Ferma", "Stop")}</button>
+          <button className="ghost aistop" onClick={() => { setAiMode(false); replyingRef.current = false; setAiThinking(false); invoke("stop_generation").catch(() => {}); }}>■ {t("Ferma", "Stop")}</button>
         </div>
       )}
       <div className="chat-scroll">

@@ -239,6 +239,13 @@ static CATEGORY_KEYWORDS: &[(&str, &[&str])] = &[
               "proponimi qualcosa", "qualcosa da fare", "cosa fare", "cosa c'è da fare", "cosa c'e da fare",
               "cosa c'è da vedere", "che c'è da fare", "cosa si fa", "eventi", "sagre", "concerti",
               "l'articolo", "articolo più", "notizie del giorno",
+              // CINEMA/FILM + "cosa POSSO fare stasera" (caso reale owner, Modena): senza web_search
+              // il modello rispondeva "non ho un database dei film" invece di CERCARLI. "cosa fare" è
+              // multi-parola e NON prende "cosa posso fare" (parole non consecutive) → forme esplicite.
+              "cinema", "al cinema", "film", "che film", "che film danno", "danno al cinema",
+              "programmazione", "in sala", "spettacol", "che danno stasera", "cosa danno",
+              "cosa posso fare", "cosa faccio stasera", "posso fare stasera", "cosa fare stasera",
+              "che fare stasera", "fare stasera", "che si fa stasera",
               // LOOKUP AZIENDA/ATTIVITÀ (caso reale app): "cosa fa la ditta X", "di cosa si occupa Y",
               // "che lavoro fa Z" → senza web_search il modello INVENTAVA l'attività. + attualità
               // generica ("che succede nel mondo") e sport ("prossimo derby") che vanno via web.
